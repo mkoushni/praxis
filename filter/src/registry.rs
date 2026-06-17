@@ -143,6 +143,18 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     register_http(factories, "url_rewrite", UrlRewriteFilter::from_config);
     register_http(factories, "json_body_field", JsonBodyFieldFilter::from_config);
     register_http(factories, "json_rpc", JsonRpcFilter::from_config);
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "token_count",
+        crate::builtins::TokenCountFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "x_token_headers",
+        crate::builtins::XTokenHeadersFilter::from_config,
+    );
 }
 
 /// Register a single HTTP filter factory by name.
