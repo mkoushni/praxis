@@ -18,6 +18,12 @@ page.
 
 ## Configs
 
+### AI / Inference
+
+| File | Description |
+| ------ | ------------- |
+| [token-counting.yaml](configs/ai/token-counting.yaml) | Extracts token usage from AI provider response bodies and headers, writes counts to filter metadata, and injects X-Token-Input, X-Token-Output, and X-Token-Total response headers |
+
 ### Branching
 
 | File | Description |
