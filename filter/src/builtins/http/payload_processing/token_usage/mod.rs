@@ -121,9 +121,8 @@ pub(crate) fn set_token_usage(ctx: &mut HttpFilterContext<'_>, input: u64, outpu
 ///
 /// # Example
 ///
-/// ```no_run
-/// use praxis_filter::builtins::http::payload_processing::token_usage::{TokenUsageProvider, extract_token_usage};
-///
+/// ```ignore
+/// // pub(crate) — see token_usage::tests for comprehensive coverage.
 /// let openai_response =
 ///     br#"{"usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}}"#;
 /// let usage = extract_token_usage(TokenUsageProvider::OpenAi, openai_response).unwrap();
