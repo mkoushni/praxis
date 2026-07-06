@@ -11,11 +11,8 @@ pub mod config_validation;
 mod json_body_field;
 pub mod json_rpc;
 pub mod on_invalid;
-#[cfg(feature = "ai-inference")]
 pub(crate) mod token_usage;
-#[cfg(feature = "ai-inference")]
 mod token_count;
-#[cfg(feature = "ai-inference")]
 mod x_token_headers;
 
 // ---------------------------------------------------------------------------
@@ -29,7 +26,5 @@ pub use compression::CompressionFilter;
 pub use json_body_field::JsonBodyFieldFilter;
 pub use json_rpc::JsonRpcFilter;
 pub use on_invalid::OnInvalidBehavior;
-#[cfg(feature = "ai-inference")]
 pub use token_count::TokenCountFilter;
-#[cfg(feature = "ai-inference")]
 pub use x_token_headers::XTokenHeadersFilter;

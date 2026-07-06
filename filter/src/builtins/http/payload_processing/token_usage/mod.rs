@@ -4,7 +4,7 @@
 //! Unified token usage extraction from AI provider responses.
 //!
 //! Maps provider-specific JSON response formats (`OpenAI`, `Anthropic`, Google,
-//! `Bedrock`, Azure) into a common [`TokenUsage`] representation.
+//! `Bedrock`, and Azure — via the `OpenAi` variant) into a common [`TokenUsage`] representation.
 
 mod providers;
 
@@ -35,7 +35,7 @@ use crate::HttpFilterContext;
 /// Fields are private to allow future changes without breaking the API.
 /// Use the getter methods to access values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TokenUsage {
+pub(crate) struct TokenUsage {
     /// Tokens in the input/prompt.
     input: u64,
 
@@ -57,12 +57,12 @@ impl TokenUsage {
     }
 
     /// Returns the number of tokens in the input/prompt.
-    pub fn input_tokens(&self) -> u64 {
+    pub(crate) fn input_tokens(&self) -> u64 {
         self.input
     }
 
     /// Returns the number of tokens in the output/completion.
-    pub fn output_tokens(&self) -> u64 {
+    pub(crate) fn output_tokens(&self) -> u64 {
         self.output
     }
 
@@ -70,14 +70,14 @@ impl TokenUsage {
     ///
     /// Some providers include this explicitly in the response;
     /// for others it is computed as `input + output`.
-    pub fn total_tokens(&self) -> u64 {
+    pub(crate) fn total_tokens(&self) -> u64 {
         self.total
     }
 }
 
 /// AI provider identifier for response format selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenUsageProvider {
+pub(crate) enum TokenUsageProvider {
     /// `OpenAI` API (`usage.prompt_tokens`, `usage.completion_tokens`).
     OpenAi,
 
@@ -106,7 +106,7 @@ pub enum TokenUsageProvider {
 /// `input.saturating_add(output)`.
 ///
 /// [`filter_metadata`]: HttpFilterContext::filter_metadata
-pub fn set_token_usage(ctx: &mut HttpFilterContext<'_>, input: u64, output: u64, total: Option<u64>) {
+pub(crate) fn set_token_usage(ctx: &mut HttpFilterContext<'_>, input: u64, output: u64, total: Option<u64>) {
     let total = total.unwrap_or_else(|| input.saturating_add(output));
 
     ctx.set_metadata("token.input", input.to_string());
@@ -131,7 +131,7 @@ pub fn set_token_usage(ctx: &mut HttpFilterContext<'_>, input: u64, output: u64,
 /// assert_eq!(usage.output_tokens(), 20);
 /// assert_eq!(usage.total_tokens(), 30);
 /// ```
-pub fn extract_token_usage(provider: TokenUsageProvider, body: &[u8]) -> Option<TokenUsage> {
+pub(crate) fn extract_token_usage(provider: TokenUsageProvider, body: &[u8]) -> Option<TokenUsage> {
     match provider {
         TokenUsageProvider::OpenAi | TokenUsageProvider::Azure => parse_openai(body),
         TokenUsageProvider::Anthropic => parse_anthropic(body),

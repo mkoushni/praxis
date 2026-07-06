@@ -13,10 +13,7 @@ pub use http::{
     CsrfFilter, DisallowedOriginMode, ForwardedHeadersFilter, GrpcDetectionFilter, GuardrailsAction, GuardrailsFilter,
     HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter, LoadBalancerFilter, PathRewriteFilter, PiiKind,
     RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus, RequestIdFilter, RouterFilter, RuleTargetKind,
-    StaticResponseFilter, TimeoutFilter, UrlRewriteFilter, has_dot_dot_traversal, normalize_rewritten_path,
+    StaticResponseFilter, TimeoutFilter, TokenCountFilter, UrlRewriteFilter, XTokenHeadersFilter,
+    has_dot_dot_traversal, normalize_rewritten_path,
 };
-#[cfg(feature = "ai-inference")]
-pub use http::TokenCountFilter;
-#[cfg(feature = "ai-inference")]
-pub use http::XTokenHeadersFilter;
 pub use tcp::{SniRouterFilter, TcpAccessLogFilter, TcpLoadBalancerFilter};

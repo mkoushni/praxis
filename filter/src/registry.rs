@@ -143,18 +143,8 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     register_http(factories, "url_rewrite", UrlRewriteFilter::from_config);
     register_http(factories, "json_body_field", JsonBodyFieldFilter::from_config);
     register_http(factories, "json_rpc", JsonRpcFilter::from_config);
-    #[cfg(feature = "ai-inference")]
-    register_http(
-        factories,
-        "token_count",
-        crate::builtins::TokenCountFilter::from_config,
-    );
-    #[cfg(feature = "ai-inference")]
-    register_http(
-        factories,
-        "x_token_headers",
-        crate::builtins::XTokenHeadersFilter::from_config,
-    );
+    register_http(factories, "token_count", crate::builtins::TokenCountFilter::from_config);
+    register_http(factories, "x_token_headers", crate::builtins::XTokenHeadersFilter::from_config);
 }
 
 /// Register a single HTTP filter factory by name.
@@ -264,9 +254,7 @@ mod tests {
         assert!(names.contains(&"json_rpc"), "json_rpc should be registered");
         #[cfg(feature = "cpex-policy-engine")]
         assert!(names.contains(&"policy"), "policy should be registered");
-        #[cfg(feature = "ai-inference")]
         assert!(names.contains(&"token_count"), "token_count should be registered");
-        #[cfg(feature = "ai-inference")]
         assert!(names.contains(&"x_token_headers"), "x_token_headers should be registered");
     }
 

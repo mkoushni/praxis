@@ -39,8 +39,6 @@ mod session_affinity;
 mod static_response;
 mod stream_buffer;
 mod timeout;
-mod token_usage_headers;
-#[cfg(feature = "ai-inference")]
 mod token_counting;
 mod virtual_hosts;
 mod websocket;

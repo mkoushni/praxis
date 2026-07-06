@@ -11,9 +11,7 @@ mod transformation;
 pub mod value_safety;
 
 pub use observability::{AccessLogFilter, RequestIdFilter};
-pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter, JsonRpcFilter};
-#[cfg(feature = "ai-inference")]
-pub use payload_processing::{TokenCountFilter, XTokenHeadersFilter};
+pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter, JsonRpcFilter, TokenCountFilter, XTokenHeadersFilter};
 #[cfg(feature = "cpex-policy-engine")]
 pub use security::PolicyFilter;
 pub use security::{
