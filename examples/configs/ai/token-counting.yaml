@@ -1,8 +1,5 @@
 # Token counting: extract and surface AI provider token usage.
 #
-# Requires the ai-inference feature:
-#   cargo build -p praxis --features ai-inference
-#
 # Chains token_count → x_token_headers → access_log.
 #
 # token_count reads the provider response body (or headers for
@@ -10,13 +7,20 @@
 # FilterContext metadata.
 #
 # x_token_headers injects X-Token-Input, X-Token-Output, and
-# X-Token-Total into the downstream response.
+# X-Token-Total into the downstream response — but only when counts
+# are available during the response-header phase.  This is currently
+# limited to the bedrock_invoke_model provider, which delivers counts
+# via upstream response headers.  For all other providers (openai,
+# anthropic, google, bedrock, azure) token counts are parsed from the
+# response body, which arrives after headers have already been sent
+# downstream; in those cases the counts are stored in FilterContext
+# and emitted via access_log, but the X-Token-* headers are not
+# injected.
 #
 # access_log emits a structured log line per request.
 #
 # Usage:
-#   RUST_LOG=info cargo run -p praxis --features ai-inference \
-#     -- -c examples/configs/ai/token-counting.yaml
+#   RUST_LOG=info cargo run -p praxis -- -c examples/configs/ai/token-counting.yaml
 
 listeners:
   - name: gateway

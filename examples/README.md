@@ -22,7 +22,7 @@ page.
 
 | File | Description |
 | ------ | ------------- |
-| [token-counting.yaml](configs/ai/token-counting.yaml) | Extracts token usage from AI provider response bodies and headers, writes counts to filter metadata, and injects X-Token-Input, X-Token-Output, and X-Token-Total response headers |
+| [token-counting.yaml](configs/ai/token-counting.yaml) | Extracts token usage from AI provider response bodies and headers and writes counts to filter metadata. X-Token-Input, X-Token-Output, and X-Token-Total response headers are injected only for `bedrock_invoke_model` (counts come from upstream response headers); for all other providers the counts are available in filter metadata and access log output only. |
 
 ### Branching
 
