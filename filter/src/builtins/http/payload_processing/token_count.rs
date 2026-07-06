@@ -282,7 +282,8 @@ fn anthropic_output_tokens(v: &serde_json::Value) -> Option<u64> {
 /// Map the filter's `ProviderKind` to the library's `TokenUsageProvider`.
 fn to_library_provider(kind: ProviderKind) -> TokenUsageProvider {
     match kind {
-        ProviderKind::Openai | ProviderKind::Azure => TokenUsageProvider::OpenAi,
+        ProviderKind::Openai => TokenUsageProvider::OpenAi,
+        ProviderKind::Azure => TokenUsageProvider::Azure,
         ProviderKind::Anthropic => TokenUsageProvider::Anthropic,
         ProviderKind::Google => TokenUsageProvider::Google,
         ProviderKind::Bedrock | ProviderKind::BedrockInvokeModel => TokenUsageProvider::Bedrock,
