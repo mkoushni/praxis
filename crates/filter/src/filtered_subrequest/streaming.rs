@@ -68,6 +68,7 @@ impl FilteredStreamingBody {
     #[expect(clippy::too_many_lines, reason = "context reconstruction requires many fields")]
     fn run_step_body_filters(&mut self, body: &mut Option<Bytes>, end_of_stream: bool) -> Result<(), FilterError> {
         let remaining_read_timeout;
+        let stream_deadline;
         let result = {
             let cont = &mut self.continuation;
             let mut ctx = crate::filter::HttpFilterContext {
@@ -129,6 +130,7 @@ impl FilteredStreamingBody {
             );
 
             remaining_read_timeout = leftover_stream_read_timeout(&mut ctx);
+            stream_deadline = leftover_stream_deadline(&mut ctx);
 
             cont.body_done_indices = ctx.body_done_indices;
             cont.executed_filter_indices = ctx.executed_filter_indices;
@@ -148,6 +150,7 @@ impl FilteredStreamingBody {
                 .into());
         }
         apply_leftover_read_timeout(&mut self.upstream, remaining_read_timeout);
+        apply_leftover_stream_deadline(&mut self.upstream, stream_deadline);
         Ok(())
     }
 
@@ -325,6 +328,33 @@ fn apply_leftover_read_timeout(body: &mut Option<Box<SubResponseBody>>, leftover
     }
 }
 
+/// Take the absolute stream deadline requested by the current body-filter pass.
+fn leftover_stream_deadline(ctx: &mut crate::filter::HttpFilterContext<'_>) -> Option<std::time::Instant> {
+    ctx.take_stream_deadline_cap()
+}
+
+/// Convert the filter context's standard monotonic instant to Tokio's instant.
+///
+/// Tokio's real-time clock is backed by the same monotonic source as
+/// `std::time::Instant`. Pairing the two readings keeps the conversion correct
+/// for ordinary runtime operation; paused Tokio time intentionally requires a
+/// test-specific clock arrangement because it no longer advances with the
+/// standard clock.
+fn std_instant_to_tokio(deadline: std::time::Instant) -> tokio::time::Instant {
+    let now_std = std::time::Instant::now();
+    let now_tokio = tokio::time::Instant::now();
+    now_tokio + deadline.saturating_duration_since(now_std)
+}
+
+/// Apply an absolute stream deadline to the live response body.
+fn apply_leftover_stream_deadline(body: &mut Option<Box<SubResponseBody>>, deadline: Option<std::time::Instant>) {
+    if let Some(deadline) = deadline
+        && let Some(upstream) = body.as_mut()
+    {
+        upstream.cap_stream_deadline(std_instant_to_tokio(deadline));
+    }
+}
+
 /// Single-round streaming body handed back to an application callout.
 ///
 /// Wraps [`FilteredStreamingBody`] and closes the two gaps a bare wrapper would
@@ -495,5 +525,30 @@ impl StreamingResponseBody for CalloutStreamingBody {
         } else if let Some(held) = self.held_extensions.as_mut() {
             std::mem::swap(held, extensions);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::std_instant_to_tokio;
+
+    #[test]
+    fn std_instant_to_tokio_preserves_a_future_deadline() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let converted = std_instant_to_tokio(deadline);
+        assert!(
+            converted > tokio::time::Instant::now(),
+            "a future standard deadline must remain in the future after conversion"
+        );
+    }
+
+    #[test]
+    fn std_instant_to_tokio_clamps_an_expired_deadline() {
+        let deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let converted = std_instant_to_tokio(deadline);
+        assert!(
+            converted <= tokio::time::Instant::now(),
+            "an expired standard deadline must not become a future Tokio deadline"
+        );
     }
 }
