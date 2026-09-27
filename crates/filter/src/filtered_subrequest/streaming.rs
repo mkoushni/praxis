@@ -529,12 +529,170 @@ impl StreamingResponseBody for CalloutStreamingBody {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::too_many_lines,
+    clippy::unwrap_used,
+    reason = "streaming deadline integration setup"
+)]
 mod tests {
-    use super::std_instant_to_tokio;
+    use std::{
+        collections::HashMap,
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use http::HeaderMap;
+    use praxis_core::subrequest::{StreamLimits, SubRequest, SubRequestClient, SubRequestError};
+
+    use super::{FilteredStreamingBody, std_instant_to_tokio};
+
+    struct ExpiredDeadlineFilter;
+
+    #[async_trait]
+    impl crate::HttpFilter for ExpiredDeadlineFilter {
+        fn name(&self) -> &'static str {
+            "expired_deadline_test_filter"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut crate::HttpFilterContext<'_>,
+        ) -> Result<crate::FilterAction, crate::FilterError> {
+            Ok(crate::FilterAction::Continue)
+        }
+
+        fn response_body_access(&self) -> crate::BodyAccess {
+            crate::BodyAccess::ReadOnly
+        }
+
+        fn on_response_body(
+            &self,
+            ctx: &mut crate::HttpFilterContext<'_>,
+            _body: &mut Option<Bytes>,
+            _end_of_stream: bool,
+        ) -> Result<crate::FilterAction, crate::FilterError> {
+            ctx.cap_stream_deadline(Instant::now() - Duration::from_secs(1));
+            Ok(crate::FilterAction::Continue)
+        }
+    }
+
+    async fn spawn_stalling_backend() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        use tokio::io::AsyncWriteExt as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            drop(tokio::io::AsyncReadExt::read(&mut socket, &mut request).await);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n")
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        (addr, handle)
+    }
+
+    #[tokio::test]
+    async fn body_filter_deadline_is_applied_to_live_body() {
+        use pingora_core::upstreams::peer::HttpPeer;
+
+        let (addr, backend) = spawn_stalling_backend().await;
+        let connector = crate::test_support::connector(1, None);
+        let client = SubRequestClient::new(connector);
+        let peer = HttpPeer::new(addr.to_string(), false, String::new());
+        let request = SubRequest {
+            method: http::Method::GET,
+            uri: http::Uri::from_static("/deadline-wire"),
+            headers: HeaderMap::new(),
+            body: Bytes::new(),
+        };
+        let response = Box::pin(client.send_streaming(
+            &peer,
+            &request,
+            Duration::from_secs(5),
+            StreamLimits {
+                idle_timeout: Duration::from_secs(30),
+                max_stream_duration: None,
+                max_total_bytes: None,
+            },
+            None,
+        ))
+        .await
+        .unwrap();
+
+        let mut registry = crate::FilterRegistry::with_builtins();
+        registry
+            .register(
+                "expired_deadline_test_filter",
+                crate::FilterFactory::Http(Arc::new(|_| Ok(Box::new(ExpiredDeadlineFilter)))),
+            )
+            .unwrap();
+        let mut entries = vec![praxis_core::config::FilterEntry {
+            branch_chains: None,
+            conditions: vec![],
+            filter_type: "expired_deadline_test_filter".into(),
+            config: serde_yaml::Value::Null,
+            name: None,
+            response_conditions: vec![],
+            failure_mode: praxis_core::config::FailureMode::default(),
+        }];
+        let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+        let continuation = super::super::continuation::FilteredSubrequestContinuation {
+            pipeline,
+            request_snapshot: crate::Request {
+                headers: HeaderMap::new(),
+                method: http::Method::GET,
+                uri: http::Uri::from_static("/deadline-wire"),
+            },
+            response_snapshot: crate::Response {
+                headers: HeaderMap::new(),
+                status: http::StatusCode::OK,
+            },
+            extensions: crate::RequestExtensions::default(),
+            filter_state: HashMap::new(),
+            filter_results: HashMap::new(),
+            filter_metadata: HashMap::new(),
+            structured_metadata: HashMap::new(),
+            executed_filter_indices: vec![true],
+            body_done_indices: vec![false],
+            response_body_bytes: 0,
+            response_body_mode: crate::BodyMode::Stream,
+            completed: false,
+            client_addr: None,
+            downstream_tls: false,
+            request_start: Instant::now(),
+            step_deadline: Instant::now() + Duration::from_secs(30),
+            peer_identity: None,
+        };
+        let mut filtered = FilteredStreamingBody::new(Box::new(response.body), continuation);
+        let mut body = Some(Bytes::from_static(b"first chunk"));
+
+        filtered.run_step_body_filters(&mut body, false).unwrap();
+        let err = filtered
+            .upstream
+            .as_mut()
+            .expect("the live upstream body must remain attached")
+            .next_chunk()
+            .await
+            .unwrap_err();
+        drop(filtered);
+        backend.abort();
+
+        assert!(
+            matches!(err, SubRequestError::DeadlineExceeded),
+            "the body filter's expired absolute deadline must reach the live body: {err}"
+        );
+    }
 
     #[test]
     fn std_instant_to_tokio_preserves_a_future_deadline() {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let deadline = Instant::now() + Duration::from_secs(1);
         let converted = std_instant_to_tokio(deadline);
         assert!(
             converted > tokio::time::Instant::now(),
@@ -544,7 +702,7 @@ mod tests {
 
     #[test]
     fn std_instant_to_tokio_clamps_an_expired_deadline() {
-        let deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let deadline = Instant::now() - Duration::from_secs(1);
         let converted = std_instant_to_tokio(deadline);
         assert!(
             converted <= tokio::time::Instant::now(),
