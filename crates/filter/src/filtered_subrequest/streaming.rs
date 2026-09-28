@@ -328,16 +328,19 @@ fn apply_leftover_read_timeout(body: &mut Option<Box<SubResponseBody>>, leftover
     }
 }
 
+/// Take the absolute stream deadline requested by the current body-filter pass.
 fn leftover_stream_deadline(ctx: &mut crate::filter::HttpFilterContext<'_>) -> Option<std::time::Instant> {
     ctx.take_stream_deadline_cap()
 }
 
+/// Convert the filter context's standard monotonic instant to Tokio's instant.
 fn std_instant_to_tokio(deadline: std::time::Instant) -> tokio::time::Instant {
     let now_std = std::time::Instant::now();
     let now_tokio = tokio::time::Instant::now();
     now_tokio + deadline.saturating_duration_since(now_std)
 }
 
+/// Apply an absolute stream deadline to the live response body.
 fn apply_leftover_stream_deadline(body: &mut Option<Box<SubResponseBody>>, deadline: Option<std::time::Instant>) {
     if let Some(deadline) = deadline
         && let Some(upstream) = body.as_mut()
