@@ -594,7 +594,7 @@ mod tests {
         use pingora_core::upstreams::peer::HttpPeer;
 
         let (addr, backend) = spawn_stalling_backend().await;
-        let connector = crate::test_support::connector(1, None);
+        let connector = praxis_core::subrequest::SubRequestConnector::new(1, None);
         let client = SubRequestClient::new(connector);
         let peer = HttpPeer::new(addr.to_string(), false, String::new());
         let request = SubRequest {
