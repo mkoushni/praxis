@@ -94,8 +94,8 @@ impl SubResponseBody {
 
     /// Tighten the absolute stream deadline.
     ///
-    /// Response-body filters can publish a wall-clock deadline through
-    /// [`HttpFilterContext::cap_stream_deadline`](praxis_filter::HttpFilterContext::cap_stream_deadline);
+    /// Response-body filters can publish a monotonic deadline through
+    /// `HttpFilterContext::cap_stream_deadline`;
     /// the streaming executor copies it here so every later
     /// [`next_chunk`](Self::next_chunk) checks elapsed time before waiting,
     /// even when downstream backpressure delays the next upstream poll.
