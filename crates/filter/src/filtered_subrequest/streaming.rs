@@ -334,6 +334,12 @@ fn leftover_stream_deadline(ctx: &mut crate::filter::HttpFilterContext<'_>) -> O
 }
 
 /// Convert the filter context's standard monotonic instant to Tokio's instant.
+///
+/// Tokio's real-time clock is backed by the same monotonic source as
+/// `std::time::Instant`. Pairing the two readings keeps the conversion correct
+/// for ordinary runtime operation; paused Tokio time intentionally requires a
+/// test-specific clock arrangement because it no longer advances with the
+/// standard clock.
 fn std_instant_to_tokio(deadline: std::time::Instant) -> tokio::time::Instant {
     let now_std = std::time::Instant::now();
     let now_tokio = tokio::time::Instant::now();
@@ -597,6 +603,7 @@ mod tests {
         use pingora_core::upstreams::peer::HttpPeer;
 
         let (addr, backend) = spawn_stalling_backend().await;
+        praxis_tls::provider::install();
         let connector = praxis_core::subrequest::SubRequestConnector::new(1, None);
         let client = SubRequestClient::new(connector);
         let peer = HttpPeer::new(addr.to_string(), false, String::new());

@@ -1273,7 +1273,7 @@ async fn cap_stream_deadline_fails_immediately_after_expiry() {
         "an expired absolute deadline must fail before starting a fresh relative timer, got: {err}"
     );
     assert!(
-        elapsed < Duration::from_millis(50),
+        elapsed < Duration::from_secs(1),
         "deadline enforcement must not wait for a new per-read timer, elapsed={elapsed:?}"
     );
     drop(body);

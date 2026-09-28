@@ -592,7 +592,7 @@ impl HttpFilterContext<'_> {
     /// Tighten the live streaming body's absolute deadline.
     ///
     /// Unlike [`cap_stream_read_timeout`](Self::cap_stream_read_timeout), this
-    /// publishes a wall-clock cutoff that the transport checks before each
+    /// publishes a monotonic cutoff that the transport checks before each
     /// upstream read. Downstream backpressure can delay the next poll without
     /// extending the deadline.
     ///
