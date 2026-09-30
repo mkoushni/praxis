@@ -542,13 +542,27 @@ pub struct HttpFilterContext<'a> {
 /// `ctx.upstream` later does not change that snapshot, so filters store
 /// leftover budget here and the streaming executor copies it onto the
 /// active read timer.
-struct StreamReadTimeoutCap(Duration);
+pub(crate) struct StreamReadTimeoutCap(Duration);
+
+impl StreamReadTimeoutCap {
+    /// Construct a leftover per-read timeout marker.
+    pub(crate) const fn new(timeout: Duration) -> Self {
+        Self(timeout)
+    }
+}
 
 /// Absolute stream deadline requested during a response-body filter pass.
 ///
 /// Stored in [`RequestExtensions`] so the streaming executor can copy the
 /// cap onto the live [`SubResponseBody`](praxis_core::subrequest::SubResponseBody).
-struct StreamDeadlineCap(Instant);
+pub(crate) struct StreamDeadlineCap(Instant);
+
+impl StreamDeadlineCap {
+    /// Construct a leftover absolute stream deadline marker.
+    pub(crate) const fn new(deadline: Instant) -> Self {
+        Self(deadline)
+    }
+}
 
 impl HttpFilterContext<'_> {
     /// Selected cluster name, if any.
@@ -576,7 +590,7 @@ impl HttpFilterContext<'_> {
             .extensions
             .get::<StreamReadTimeoutCap>()
             .map_or(timeout, |existing| existing.0.min(timeout));
-        self.extensions.insert(StreamReadTimeoutCap(next));
+        self.extensions.insert(StreamReadTimeoutCap::new(next));
     }
 
     /// Leftover per-read timeout requested during this body-filter pass.
@@ -596,13 +610,16 @@ impl HttpFilterContext<'_> {
     /// upstream read. Downstream backpressure can delay the next poll without
     /// extending the deadline.
     ///
+    /// Only the filtered sub-request streaming executor reads this cap, so it
+    /// does not bound a normally proxied upstream response.
+    ///
     /// A tighter existing deadline is left in place.
     pub fn cap_stream_deadline(&mut self, deadline: Instant) {
         let next = self
             .extensions
             .get::<StreamDeadlineCap>()
             .map_or(deadline, |existing| existing.0.min(deadline));
-        self.extensions.insert(StreamDeadlineCap(next));
+        self.extensions.insert(StreamDeadlineCap::new(next));
     }
 
     /// Absolute stream deadline requested during this body-filter pass.
