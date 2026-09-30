@@ -333,17 +333,13 @@ fn leftover_stream_deadline(ctx: &mut crate::filter::HttpFilterContext<'_>) -> O
     ctx.take_stream_deadline_cap()
 }
 
-/// Convert the filter context's standard monotonic instant to Tokio's instant.
+/// Convert the filter context's standard monotonic instant to Tokio's instant
+/// without sampling either clock.
 ///
-/// Tokio's real-time clock is backed by the same monotonic source as
-/// `std::time::Instant`. Pairing the two readings keeps the conversion correct
-/// for ordinary runtime operation; paused Tokio time intentionally requires a
-/// test-specific clock arrangement because it no longer advances with the
-/// standard clock.
+/// Tokio's direct conversion preserves the supplied absolute cutoff, including
+/// when Tokio's clock is paused in a test.
 fn std_instant_to_tokio(deadline: std::time::Instant) -> tokio::time::Instant {
-    let now_std = std::time::Instant::now();
-    let now_tokio = tokio::time::Instant::now();
-    now_tokio + deadline.saturating_duration_since(now_std)
+    tokio::time::Instant::from_std(deadline)
 }
 
 /// Apply an absolute stream deadline to the live response body.
@@ -699,6 +695,11 @@ mod tests {
             converted > tokio::time::Instant::now(),
             "a future standard deadline must remain in the future after conversion"
         );
+        assert_eq!(
+            converted.into_std(),
+            deadline,
+            "direct conversion must preserve the absolute deadline"
+        );
     }
 
     #[test]
@@ -708,6 +709,11 @@ mod tests {
         assert!(
             converted <= tokio::time::Instant::now(),
             "an expired standard deadline must not become a future Tokio deadline"
+        );
+        assert_eq!(
+            converted.into_std(),
+            deadline,
+            "direct conversion must preserve an expired absolute deadline"
         );
     }
 }
