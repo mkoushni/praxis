@@ -8,6 +8,13 @@ use std::net::{IpAddr, SocketAddr};
 use super::peer::{AddressResolutionError, resolve_host_cached, resolve_host_per_call};
 use crate::{connectivity::normalize_mapped_ipv4, egress::PeerSpec, subrequest::SubRequest};
 
+/// Reserved request marker for targets bound from absolute URLs.
+///
+/// The sub-request client uses this marker to suppress credential-bearing
+/// paths from diagnostics. Reserved-header sanitization removes it before the
+/// request crosses the transport boundary.
+pub(crate) const URL_TARGET_MARKER: &str = "x-praxis-url-target";
+
 /// Failure categories for URL target preparation.
 ///
 /// `Display` for every variant is credential-safe: it never echoes the input
@@ -360,6 +367,10 @@ impl PreparedTarget {
     #[must_use]
     pub fn bind(self, mut request: SubRequest) -> PreparedSubrequest {
         request.headers.insert(http::header::HOST, self.host_authority);
+        request.headers.insert(
+            http::header::HeaderName::from_static(URL_TARGET_MARKER),
+            http::HeaderValue::from_static("1"),
+        );
         request.uri = self.origin_form;
         PreparedSubrequest {
             is_tls: self.is_tls,

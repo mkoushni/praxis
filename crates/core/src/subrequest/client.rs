@@ -70,25 +70,6 @@ const EAGER_BODY_CAPACITY: usize = 131_072; // 128 KiB
 /// targets ([`UrlResolutionPolicy::OperatorCached`]) are not capped.
 const MAX_CLIENT_SELECTED_DIALS: usize = 4;
 
-/// Whether a connection event may include the outbound request path.
-#[derive(Clone, Copy)]
-enum RequestPathLog {
-    /// Log the path for an operator-selected peer.
-    Include,
-    /// Suppress the path bound from a potentially client-supplied URL.
-    Redact,
-}
-
-impl RequestPathLog {
-    /// Return the bounded value recorded by the connection event.
-    fn value(self, request: &SubRequest) -> &str {
-        match self {
-            Self::Include => request.uri.path(),
-            Self::Redact => "<redacted>",
-        }
-    }
-}
-
 // -----------------------------------------------------------------------------
 // SubRequestClient
 // -----------------------------------------------------------------------------
@@ -266,7 +247,6 @@ impl<C: Connector> SubRequestClient<C> {
                 remaining,
                 connect_cap,
                 framework_headers,
-                RequestPathLog::Redact,
             ))
             .await
             {
@@ -323,7 +303,6 @@ impl<C: Connector> SubRequestClient<C> {
         connect_attempt_cap: Option<Duration>,
         framework_headers: Option<&FrameworkHeaders>,
         abandon_neutral: bool,
-        request_path_log: RequestPathLog,
     ) -> Result<RawExchange<'conn, 'conn, C>, SubRequestError> {
         #[cfg(feature = "otel")]
         let client_span = subrequest_client_span(peer, request);
@@ -339,7 +318,6 @@ impl<C: Connector> SubRequestClient<C> {
                 framework_headers,
                 &client_span,
                 abandon_neutral,
-                request_path_log,
             )
             .instrument(client_span.clone())
             .await;
@@ -365,7 +343,6 @@ impl<C: Connector> SubRequestClient<C> {
         framework_headers: Option<&FrameworkHeaders>,
         client_span: &Span,
         abandon_neutral: bool,
-        request_path_log: RequestPathLog,
     ) -> Result<RawExchange<'conn, 'conn, C>, SubRequestError> {
         let exchange_started = tokio::time::Instant::now();
         let deadline = exchange_started
@@ -438,10 +415,9 @@ impl<C: Connector> SubRequestClient<C> {
             peer = %peer.address,
             reused = session.reused(),
             method = %request.method,
-            // URL-mode paths and queries can carry credentials. Keep paths for
-            // operator-selected peers, but emit only a fixed value when
-            // execute_url bound the request target from a supplied URL.
-            path = request_path_log.value(request),
+            // URL-mode paths and queries can carry credentials. Prepared URL
+            // requests carry an internal marker that is stripped before send.
+            path = request_path_for_log(request),
             "sub-request: connected"
         );
 
@@ -613,15 +589,7 @@ impl<C: Connector> SubRequestClient<C> {
         // bounds the whole connect-plus-header phase. Cancellation still records
         // a circuit failure; only a hedged attempt is neutral on drop.
         let mut exchange = self
-            .open_exchange(
-                peer,
-                request,
-                timeout,
-                None,
-                framework_headers,
-                false,
-                RequestPathLog::Include,
-            )
+            .open_exchange(peer, request, timeout, None, framework_headers, false)
             .await?;
 
         // Hold the circuit guard until the header-time outcome is known.
@@ -756,7 +724,6 @@ impl<C: Connector> SubRequestClient<C> {
             None,
             framework_headers,
             false,
-            RequestPathLog::Include,
         )
         .await
     }
@@ -791,7 +758,6 @@ impl<C: Connector> SubRequestClient<C> {
             None,
             framework_headers,
             true,
-            RequestPathLog::Include,
         )
         .await
     }
@@ -814,7 +780,6 @@ impl<C: Connector> SubRequestClient<C> {
         timeout: Duration,
         connect_attempt_cap: Option<Duration>,
         framework_headers: Option<&FrameworkHeaders>,
-        request_path_log: RequestPathLog,
     ) -> Result<SubResponse, SubRequestError> {
         self.execute_inner(
             peer,
@@ -824,7 +789,6 @@ impl<C: Connector> SubRequestClient<C> {
             connect_attempt_cap,
             framework_headers,
             false,
-            request_path_log,
         )
         .await
     }
@@ -845,7 +809,6 @@ impl<C: Connector> SubRequestClient<C> {
         connect_attempt_cap: Option<Duration>,
         framework_headers: Option<&FrameworkHeaders>,
         abandon_neutral: bool,
-        request_path_log: RequestPathLog,
     ) -> Result<SubResponse, SubRequestError> {
         let exchange = self
             .open_exchange(
@@ -855,7 +818,6 @@ impl<C: Connector> SubRequestClient<C> {
                 connect_attempt_cap,
                 framework_headers,
                 abandon_neutral,
-                request_path_log,
             )
             .await;
 
@@ -981,6 +943,15 @@ impl<C: Connector> SubRequestClient<C> {
 // -----------------------------------------------------------------------------
 // Request Assembly
 // -----------------------------------------------------------------------------
+
+/// Return the request path or a fixed label for a URL-bound target.
+fn request_path_for_log(request: &SubRequest) -> &str {
+    if request.headers.contains_key(crate::connectivity::URL_TARGET_MARKER) {
+        "<redacted>"
+    } else {
+        request.uri.path()
+    }
+}
 
 /// Build the sanitized request head: the method, the origin-form target, and
 /// the headers that may cross the sub-request boundary.
@@ -1316,6 +1287,18 @@ mod tests {
             "EAGER_BODY_CAPACITY should be 128 KiB in bytes"
         );
         assert_eq!(EAGER_BODY_CAPACITY, 128 * 1024, "EAGER_BODY_CAPACITY should be 128 KiB");
+    }
+
+    #[test]
+    fn direct_request_path_remains_visible_in_connection_event() {
+        let request = SubRequest {
+            method: http::Method::GET,
+            uri: http::Uri::from_static("/operator-health-path?query-is-never-logged"),
+            headers: HeaderMap::new(),
+            body: Bytes::new(),
+        };
+
+        assert_eq!(request_path_for_log(&request), "/operator-health-path");
     }
 
     #[test]
