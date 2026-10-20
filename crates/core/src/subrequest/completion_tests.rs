@@ -5,7 +5,7 @@
 
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -15,7 +15,10 @@ use bytes::Bytes;
 use http::{HeaderMap, Version};
 
 use super::{SubRequest, SubRequestClient, SubRequestConnector, SubRequestError};
-use crate::egress::{Completion, Connector, EgressError, PeerSpec, RequestHead, ResponseHead, Session};
+use crate::{
+    connectivity::UrlResolutionPolicy,
+    egress::{Completion, Connector, EgressError, PeerSpec, RequestHead, ResponseHead, Session},
+};
 
 /// Completion outcome independently reported by the fake transport.
 #[derive(Clone, Copy, Debug)]
@@ -39,6 +42,8 @@ struct Lifecycle {
     reused: AtomicUsize,
     /// Number of non-reusable releases.
     discarded: AtomicUsize,
+    /// Request targets handed to the transport.
+    sent_targets: Mutex<Vec<String>>,
 }
 
 /// Backend reporting completion separately from EOF or header-time termination.
@@ -93,7 +98,13 @@ impl Session for FakeSession {
         false
     }
 
-    async fn send_request_head(&mut self, _head: RequestHead) -> Result<(), EgressError> {
+    async fn send_request_head(&mut self, head: RequestHead) -> Result<(), EgressError> {
+        self.connector
+            .lifecycle
+            .sent_targets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(head.target);
         Ok(())
     }
 
@@ -139,6 +150,94 @@ impl Session for FakeSession {
     async fn shutdown(&mut self) {
         self.connector.lifecycle.shutdowns.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+/// Capture fields from tracing events emitted during an exchange.
+#[derive(Clone, Default)]
+struct EventCapture(Arc<Mutex<Vec<(String, String)>>>);
+
+impl<S> tracing_subscriber::Layer<S> for EventCapture
+where
+    S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+        struct Visitor<'fields>(&'fields mut Vec<(String, String)>);
+
+        impl tracing::field::Visit for Visitor<'_> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push((field.name().to_owned(), format!("{value:?}")));
+            }
+        }
+
+        let mut captured = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        event.record(&mut Visitor(&mut captured));
+    }
+}
+
+/// URL execution must keep its wire target while suppressing it from logs.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "wire-target and tracing assertions share one exchange"
+)]
+#[expect(clippy::expect_used, reason = "fixed fake transport must complete successfully")]
+async fn url_execution_redacts_path_from_connection_event() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    const SECRET_PATH: &str = "PATH_BEARER_SECRET";
+    let lifecycle = Arc::new(Lifecycle::default());
+    let connector = FakeConnector {
+        header_done: true,
+        end_state: EndState::Finished,
+        lifecycle: Arc::clone(&lifecycle),
+    };
+    let client = SubRequestClient::new(SubRequestConnector::with_connector(connector, None, None));
+    let request = SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::default(),
+        headers: HeaderMap::new(),
+        body: Bytes::new(),
+    };
+    let capture = EventCapture::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let url = format!("http://127.0.0.1:8080/{SECRET_PATH}/file?signature=QUERY_SECRET");
+
+    let response = client
+        .execute_url(
+            &url,
+            request,
+            |_| Ok(()),
+            UrlResolutionPolicy::ClientPerCall,
+            Duration::from_secs(5),
+            1024,
+            None,
+        )
+        .await
+        .expect("fake URL exchange should succeed");
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        lifecycle
+            .sent_targets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_slice(),
+        [format!("/{SECRET_PATH}/file?signature=QUERY_SECRET")],
+        "redaction must not alter the outbound request target"
+    );
+    let events = capture.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        events
+            .iter()
+            .any(|(name, value)| name == "path" && value.contains("<redacted>")),
+        "connection event should contain a fixed redacted path: {events:?}"
+    );
+    assert!(
+        events.iter().all(|(_, value)| !value.contains(SECRET_PATH)),
+        "connection event must not contain the path credential: {events:?}"
+    );
+    drop(events);
 }
 
 /// Exercise both collection exits against all completion outcomes.

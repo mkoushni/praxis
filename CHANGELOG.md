@@ -153,6 +153,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- URL-mode sub-requests no longer include their path in debug connection
+  events. Paths supplied by clients can contain bearer tokens or signed
+  download identifiers; the actual outbound request target is unchanged.
 - `rustls` is 0.23.46, which fixes buffered application data sent after ECH
   rejection, Brotli certificate decompression allocating before
   authentication, an unauthenticated ServerHello downgrading later
