@@ -39,6 +39,7 @@ use super::{
     },
     common_message_format::{entity_for_protocol_method, entity_for_protocol_method_post},
     config::{BodyAccessMode, PolicyFilterConfig},
+    context::{PolicyResponseContext, PolicyResponseOutput},
     dispatch::{block_on_bounded, ensure_dispatch_runtime, response_dispatch_timeout},
     error::{
         VIOLATION_HEADER, auth_rejection, deny_with_body, json_rpc_error_envelope_bytes, json_rpc_error_rejection,
@@ -624,8 +625,10 @@ impl PolicyFilter {
             tracing::warn!(
                 target: "policy.filter",
                 "policy declares response-phase `llm:` rules (`post_invocation`) but \
-                 `body_access` is `read_only`, which does not buffer the response: those rules \
-                 will never run. Set `body_access: read_write` to enable them.",
+                 `body_access` is `read_only`, which does not buffer the response: rules that \
+                 need response content will not run. A host may still trigger metadata-only \
+                 response policy by supplying `PolicyResponseContext`; otherwise set \
+                 `body_access: read_write`.",
             );
         }
         tracing::debug!(
@@ -1464,6 +1467,54 @@ impl PolicyFilter {
         Ok(FilterAction::Continue)
     }
 
+    /// Evaluate response policy over host-provided context without response content.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear trusted-context construction, dispatch, and output publication"
+    )]
+    fn dispatch_llm_response_context(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        let Some(context) = ctx.extensions.get::<PolicyResponseContext>().cloned() else {
+            return Ok(FilterAction::Continue);
+        };
+        let Some(InferenceRequest { model }) = ctx.extensions.get::<InferenceRequest>() else {
+            return Ok(FilterAction::Continue);
+        };
+        let model = model.clone();
+        let mut headers = Self::snapshot_headers(ctx);
+        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
+        let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() else {
+            return Err("policy: request identity unavailable for metadata-only response policy".into());
+        };
+        let mut extensions = Self::extensions_from_identity(&headers, identity, ENTITY_LLM, &model, &self.cfg);
+        extensions.llm = Some(Arc::new(LLMExtension {
+            model_id: Some(model),
+            provider: self.cfg.llm.provider.clone(),
+            capabilities: Vec::new(),
+        }));
+        extensions.custom = Some(context.custom());
+        let payload = MessagePayload {
+            message: Message::with_content(Role::Assistant, Vec::new()),
+        };
+        let result = self.dispatch_response_cmf(
+            HOOK_CMF_LLM_OUTPUT,
+            payload,
+            extensions,
+            "metadata-only inference response-phase",
+        )?;
+        if !result.continue_processing {
+            tracing::warn!(
+                target: "policy.filter",
+                violation = ?result.violation,
+                "metadata-only inference response policy denied after response content was released",
+            );
+            return Ok(FilterAction::Continue);
+        }
+        if let Some(custom) = result.modified_extensions.and_then(|modified| modified.custom) {
+            ctx.extensions.insert(PolicyResponseOutput::new(custom));
+        }
+        Ok(FilterAction::Continue)
+    }
+
     /// Return the request model for a non-streaming inference response.
     fn llm_response_model(ctx: &HttpFilterContext<'_>) -> Option<String> {
         let inference = ctx.extensions.get::<InferenceRequest>()?;
@@ -2273,8 +2324,12 @@ impl HttpFilter for PolicyFilter {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        // Release SSE immediately because it has no single completion to evaluate.
-        if matches!(self.cfg.body_access, BodyAccessMode::ReadWrite) && self.inference_response_is_streamed(ctx) {
+        // Release SSE chunks immediately because there is no single completion to buffer.
+        // Keep the clean-EOF callback available for metadata-only response policy.
+        if !end_of_stream
+            && matches!(self.cfg.body_access, BodyAccessMode::ReadWrite)
+            && self.inference_response_is_streamed(ctx)
+        {
             return Ok(FilterAction::Release);
         }
         if !end_of_stream {
@@ -2284,6 +2339,12 @@ impl HttpFilter for PolicyFilter {
         // a pure L7 (or identity-only) policy has no per-entity post hook.
         if !self.entity_routes {
             return Ok(FilterAction::Continue);
+        }
+        if self.llm_post
+            && ctx.extensions.get::<PolicyResponseContext>().is_some()
+            && (matches!(self.cfg.body_access, BodyAccessMode::ReadOnly) || self.inference_response_is_streamed(ctx))
+        {
+            return self.dispatch_llm_response_context(ctx);
         }
         // Response hooks require the buffering enabled by `read_write`.
         if !matches!(self.cfg.body_access, BodyAccessMode::ReadWrite) {

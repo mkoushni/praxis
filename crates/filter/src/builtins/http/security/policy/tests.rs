@@ -18,6 +18,7 @@ use tempfile::TempDir;
 
 use super::{
     config::{BodyAccessMode, ContextField, ContextMetaConfig, PolicyFilterConfig},
+    context::{PolicyResponseContext, PolicyResponseOutput},
     filter::PolicyFilter,
 };
 use crate::{
@@ -3519,6 +3520,53 @@ struct StubFactory {
     builds: Arc<AtomicUsize>,
 }
 
+/// Test plugin that proves host response context traverses PPE and comes back
+/// through modified extensions.
+struct ResponseContextPlugin {
+    cfg: PluginConfig,
+}
+
+impl Plugin for ResponseContextPlugin {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<CmfHook> for ResponseContextPlugin {
+    async fn handle(
+        &self,
+        _payload: &MessagePayload,
+        extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<MessagePayload> {
+        let observed = extensions
+            .custom
+            .as_ref()
+            .and_then(|custom| custom.get("quota_input"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let mut modified = extensions.cow_copy();
+        modified.custom.get_or_insert_default().insert(
+            "quota_output".to_owned(),
+            json!({"engine": "ppe", "observed": observed}),
+        );
+        PluginResult::modify_extensions(modified)
+    }
+}
+
+struct ResponseContextFactory;
+
+impl PluginFactory for ResponseContextFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(ResponseContextPlugin { cfg: config.clone() });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.llm_output", adapter)],
+        })
+    }
+}
+
 impl PluginFactory for StubFactory {
     fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
         self.builds.fetch_add(1, Ordering::SeqCst);
@@ -4582,6 +4630,56 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
+/// Write an inference policy that runs a host plugin over metadata-only
+/// response context.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting utilities would obscure the shape under test"
+)]
+fn write_llm_response_context_config() -> (TempDir, String) {
+    register_policy_plugin_factory("test/response-context", Arc::new(|| Box::new(ResponseContextFactory)));
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+  - name: response-context
+    kind: test/response-context
+    hooks:
+      - cmf.llm_output
+    mode: sequential
+    on_error: fail
+global:
+  authentication:
+    - jwt-user
+routes:
+  - llm: "*"
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+      post_invocation:
+        - "run(response-context)"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
 /// Build a policy filter with custom inference options.
 fn build_filter_with_llm(config_path: String, llm: super::config::LlmOptions) -> PolicyFilter {
     PolicyFilter::new(
@@ -5514,6 +5612,41 @@ async fn a_streamed_response_releases_the_buffer_on_the_first_chunk() {
     assert!(
         matches!(action, FilterAction::Release),
         "a mid-stream SSE chunk must release the buffer, not be held to EOS; got {action:?}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn metadata_only_response_context_runs_through_ppe_without_buffering_sse() {
+    let (_dir, path) = write_llm_response_context_config();
+    let filter = build_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+    ctx.extensions.insert(PolicyResponseContext::new(HashMap::from([(
+        "quota_input".to_owned(),
+        json!({"tokens": 42}),
+    )])));
+
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("text/event-stream"));
+    ctx.response_header = Some(&mut response);
+    let mut body = Some(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
+    let action = filter
+        .on_response_body(&mut ctx, &mut body, true)
+        .expect("metadata-only response policy ran");
+
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(body, Some(bytes::Bytes::from_static(b"data: [DONE]\n\n")));
+    let output = ctx
+        .extensions
+        .get::<PolicyResponseOutput>()
+        .expect("PPE output is available to downstream filters");
+    assert_eq!(
+        output.get("quota_output"),
+        Some(&json!({"engine": "ppe", "observed": {"tokens": 42}})),
     );
 }
 
@@ -6573,7 +6706,6 @@ fn an_http_route_beside_entity_routes_fails_filter_construction() {
         "the refusal has to reach the operator as a startup failure; got {err}",
     );
 }
-
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_global_block_does_authorize_classified_mcp_traffic() {
