@@ -5736,6 +5736,39 @@ async fn read_only_non_streamed_response_publishes_metadata_policy_output() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn content_only_response_policy_preserves_host_context_without_dispatch() {
+    let (_dir, path) = write_llm_post_config();
+    let filter = build_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+    ctx.extensions.insert(PolicyResponseContext::new(HashMap::from([(
+        "quota_input".to_owned(),
+        json!({"tokens": 11}),
+    )])));
+
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    ctx.response_header = Some(&mut response);
+    let original = bytes::Bytes::from_static(b"{\"answer\":\"ok\"}");
+    let mut body = Some(original.clone());
+    let action = filter
+        .on_response_body(&mut ctx, &mut body, true)
+        .expect("host context publication ran");
+
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(body, Some(original));
+    let output = ctx
+        .extensions
+        .get::<PolicyResponseOutput>()
+        .expect("host context is available to downstream filters");
+    assert_eq!(output.get("quota_input"), Some(&json!({"tokens": 11})));
+    assert!(output.violation().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_over_budget_completion_is_replaced_with_a_provider_error() {
     let (_dir, path) = write_llm_post_config();
     let filter = build_read_write_filter(path);

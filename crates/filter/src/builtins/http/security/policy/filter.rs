@@ -1479,10 +1479,12 @@ impl PolicyFilter {
         reason = "linear trusted-context construction, dispatch, and output publication"
     )]
     fn dispatch_llm_response_context(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let Some(manager) = self.response_context_mgr.as_ref() else {
+        let Some(context) = ctx.extensions.get::<PolicyResponseContext>() else {
             return Ok(FilterAction::Continue);
         };
-        let Some(context) = ctx.extensions.get::<PolicyResponseContext>().cloned() else {
+        let host_custom = context.custom();
+        let Some(manager) = self.response_context_mgr.as_ref() else {
+            ctx.extensions.insert(PolicyResponseOutput::new(host_custom, None));
             return Ok(FilterAction::Continue);
         };
         let Some(InferenceRequest { model }) = ctx.extensions.get::<InferenceRequest>() else {
@@ -1500,7 +1502,7 @@ impl PolicyFilter {
             provider: self.cfg.llm.provider.clone(),
             capabilities: Vec::new(),
         }));
-        extensions.custom = Some(context.custom());
+        extensions.custom = Some(Arc::clone(&host_custom));
         let payload = MessagePayload {
             message: Message::with_content(Role::Assistant, Vec::new()),
         };
@@ -1515,7 +1517,7 @@ impl PolicyFilter {
             .modified_extensions
             .as_ref()
             .and_then(|modified| modified.custom.clone())
-            .unwrap_or_else(|| context.custom());
+            .unwrap_or(host_custom);
         let violation = result.violation.clone();
         ctx.extensions
             .insert(PolicyResponseOutput::new(custom, violation.clone()));
