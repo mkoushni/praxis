@@ -3369,7 +3369,7 @@ dependencies = [
  "percent-encoding",
  "praxis-proxy-tls",
  "quixotic-plecostomus-core",
- "quixotic-plecostomus-http 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "quixotic-plecostomus-http",
  "rand 0.10.3",
  "rcgen",
  "regex",
@@ -3450,7 +3450,7 @@ dependencies = [
  "praxis-proxy-filter",
  "praxis-proxy-tls",
  "quixotic-plecostomus-core",
- "quixotic-plecostomus-http 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "quixotic-plecostomus-http",
  "quixotic-plecostomus-proxy",
  "rand 0.10.3",
  "rcgen",
@@ -3781,9 +3781,9 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "quixotic-plecostomus-core",
- "quixotic-plecostomus-error 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "quixotic-plecostomus-error",
  "quixotic-plecostomus-header-serde",
- "quixotic-plecostomus-http 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "quixotic-plecostomus-http",
  "quixotic-plecostomus-lru",
  "quixotic-plecostomus-timeout",
  "rand 0.10.3",
@@ -3825,8 +3825,8 @@ dependencies = [
  "ouroboros",
  "parking_lot",
  "percent-encoding",
- "quixotic-plecostomus-error 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "quixotic-plecostomus-http 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "quixotic-plecostomus-error",
+ "quixotic-plecostomus-http",
  "quixotic-plecostomus-pool",
  "quixotic-plecostomus-runtime",
  "quixotic-plecostomus-rustls",
@@ -3852,12 +3852,6 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-error"
 version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b862d21a4a583c3ca4d99b8e19edee88e6633c8e697af1fb69bc31debcd9f42"
-
-[[package]]
-name = "quixotic-plecostomus-error"
-version = "0.11.1"
 source = "git+https://github.com/praxis-proxy/pingora?rev=4fde8bb89a96c54ee19134d66d91f03e81f67f0a#4fde8bb89a96c54ee19134d66d91f03e81f67f0a"
 
 [[package]]
@@ -3868,22 +3862,11 @@ dependencies = [
  "bytes",
  "http",
  "httparse",
- "quixotic-plecostomus-error 0.11.1 (git+https://github.com/praxis-proxy/pingora?rev=4fde8bb89a96c54ee19134d66d91f03e81f67f0a)",
- "quixotic-plecostomus-http 0.11.1 (git+https://github.com/praxis-proxy/pingora?rev=4fde8bb89a96c54ee19134d66d91f03e81f67f0a)",
+ "quixotic-plecostomus-error",
+ "quixotic-plecostomus-http",
  "thread_local",
  "zstd",
  "zstd-safe",
-]
-
-[[package]]
-name = "quixotic-plecostomus-http"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "120737916ea88106a578a927d7f08cea307c47d302cca8da9c10526f18ad53e8"
-dependencies = [
- "bytes",
- "http",
- "quixotic-plecostomus-error 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -3893,7 +3876,7 @@ source = "git+https://github.com/praxis-proxy/pingora?rev=4fde8bb89a96c54ee19134
 dependencies = [
  "bytes",
  "http",
- "quixotic-plecostomus-error 0.11.1 (git+https://github.com/praxis-proxy/pingora?rev=4fde8bb89a96c54ee19134d66d91f03e81f67f0a)",
+ "quixotic-plecostomus-error",
 ]
 
 [[package]]
@@ -3945,8 +3928,8 @@ dependencies = [
  "once_cell",
  "quixotic-plecostomus-cache",
  "quixotic-plecostomus-core",
- "quixotic-plecostomus-error 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "quixotic-plecostomus-http 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "quixotic-plecostomus-error",
+ "quixotic-plecostomus-http",
  "rand 0.10.3",
  "regex",
  "tokio",
@@ -3974,7 +3957,7 @@ checksum = "0b8036fd795e8f7d40b255765a30ce936769e6f34cf2f6aed1a7323e2512fc42"
 dependencies = [
  "log",
  "no_debug",
- "quixotic-plecostomus-error 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "quixotic-plecostomus-error",
  "rustls",
  "rustls-native-certs 0.7.3",
  "rustls-pemfile",
