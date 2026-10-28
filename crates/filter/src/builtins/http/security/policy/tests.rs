@@ -4673,6 +4673,7 @@ routes:
       pre_invocation:
         - "require(authenticated)"
       post_invocation:
+        - "require(completion.tokens.total > 100)"
         - "run(response-context)"
 "#
     );
@@ -5616,6 +5617,10 @@ async fn a_streamed_response_releases_the_buffer_on_the_first_chunk() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression covers both SSE delivery phases and the published PPE output"
+)]
 async fn metadata_only_response_context_runs_through_ppe_without_buffering_sse() {
     let (_dir, path) = write_llm_response_context_config();
     let filter = build_read_write_filter(path);
