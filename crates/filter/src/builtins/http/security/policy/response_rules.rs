@@ -3,6 +3,8 @@
 
 //! Load-time checks for response rules whose payload is unavailable.
 
+use std::collections::HashSet;
+
 use ppe::{
     praxis_policy_apl_core::{
         parser::compile_policy_block_value,
@@ -14,6 +16,11 @@ use ppe::{
     },
 };
 use serde_yaml::Value;
+
+/// Plugin declaration proving the handler accepts an empty response message.
+const METADATA_ONLY_RESPONSE_CAPABILITY: &str = "metadata_only_response";
+/// PPE hook used for inference response policy.
+const LLM_OUTPUT_HOOK: &str = "cmf.llm_output";
 
 use crate::FilterError;
 
@@ -62,48 +69,105 @@ pub(super) fn metadata_only_policy(yaml: &str) -> Result<Option<String>, FilterE
 }
 
 /// Filter every policy layer that can contribute to an effective route.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the global, default, group, and route policy layers are filtered uniformly"
+)]
 fn filter_document(document: &mut Value) -> Result<usize, FilterError> {
-    let mut retained = 0;
     let Some(root) = document.as_mapping_mut() else {
-        return Ok(retained);
+        return Ok(0);
     };
+    let metadata_plugins = retain_metadata_response_plugins(root);
+    let mut retained = metadata_plugins.len();
     if let Some(global) = root.get_mut("global") {
-        retained = retained.saturating_add(filter_policy_block(global, "global")?);
+        retained = retained.saturating_add(filter_policy_block(global, "global", &metadata_plugins)?);
         if let Some(defaults) = global.get_mut("defaults").and_then(Value::as_mapping_mut) {
             for (entity, block) in defaults {
                 retained = retained.saturating_add(filter_policy_block(
                     block,
                     &format!("global.defaults.{}", key_name(entity)),
+                    &metadata_plugins,
                 )?);
             }
         }
     }
     if let Some(groups) = root.get_mut("groups").and_then(Value::as_mapping_mut) {
         for (name, block) in groups {
-            retained = retained.saturating_add(filter_policy_block(block, &format!("groups.{}", key_name(name)))?);
+            retained = retained.saturating_add(filter_policy_block(
+                block,
+                &format!("groups.{}", key_name(name)),
+                &metadata_plugins,
+            )?);
         }
     }
     if let Some(routes) = root.get_mut("routes").and_then(Value::as_sequence_mut) {
         for (index, block) in routes.iter_mut().enumerate() {
-            retained = retained.saturating_add(filter_policy_block(block, &format!("routes[{index}]"))?);
+            retained = retained.saturating_add(filter_policy_block(
+                block,
+                &format!("routes[{index}]"),
+                &metadata_plugins,
+            )?);
         }
     }
     Ok(retained)
 }
 
+/// Retain response plugins that explicitly accept an empty message payload.
+fn retain_metadata_response_plugins(root: &mut serde_yaml::Mapping) -> HashSet<String> {
+    let Some(plugins) = root.get_mut("plugins").and_then(Value::as_sequence_mut) else {
+        return HashSet::new();
+    };
+    let mut metadata_plugins = HashSet::new();
+    plugins.retain(|plugin| {
+        let Some(mapping) = plugin.as_mapping() else {
+            return false;
+        };
+        let handles_output = mapping
+            .get("hooks")
+            .and_then(Value::as_sequence)
+            .is_some_and(|hooks| hooks.iter().any(|hook| hook.as_str() == Some(LLM_OUTPUT_HOOK)));
+        if !handles_output {
+            return false;
+        }
+        let capable = mapping
+            .get("capabilities")
+            .and_then(Value::as_sequence)
+            .is_some_and(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|capability| capability.as_str() == Some(METADATA_ONLY_RESPONSE_CAPABILITY))
+            });
+        if capable && let Some(name) = mapping.get("name").and_then(Value::as_str) {
+            metadata_plugins.insert(name.to_owned());
+        }
+        capable
+    });
+    metadata_plugins
+}
+
 /// Drop result pipelines and response-content-dependent post steps from one layer.
-fn filter_policy_block(block: &mut Value, source: &str) -> Result<usize, FilterError> {
+#[expect(
+    clippy::too_many_lines,
+    reason = "one policy block is normalized and pruned as a single YAML transaction"
+)]
+fn filter_policy_block(
+    block: &mut Value,
+    source: &str,
+    metadata_plugins: &HashSet<String>,
+) -> Result<usize, FilterError> {
     let Some(mapping) = block.as_mapping_mut() else {
         return Ok(0);
     };
     mapping.remove("result");
+    mapping.remove("authentication");
     let Some(authorization) = mapping.get_mut("authorization").and_then(Value::as_mapping_mut) else {
         return Ok(0);
     };
+    authorization.remove("pre_invocation");
     let retained = authorization
         .get("post_invocation")
         .and_then(Value::as_sequence)
-        .map(|steps| filter_post_steps(steps, source))
+        .map(|steps| filter_post_steps(steps, source, metadata_plugins))
         .transpose()?
         .unwrap_or_default();
     if retained.is_empty() {
@@ -125,7 +189,11 @@ fn filter_policy_block(block: &mut Value, source: &str) -> Result<usize, FilterE
 }
 
 /// Compile each declared step and retain only effects independent of response content.
-fn filter_post_steps(steps: &[Value], source: &str) -> Result<Vec<Value>, FilterError> {
+fn filter_post_steps(
+    steps: &[Value],
+    source: &str,
+    metadata_plugins: &HashSet<String>,
+) -> Result<Vec<Value>, FilterError> {
     steps
         .iter()
         .enumerate()
@@ -140,32 +208,49 @@ fn filter_post_steps(steps: &[Value], source: &str) -> Result<Vec<Value>, Filter
             let compiled = compile_policy_block_value(source, &block).map_err(|error| -> FilterError {
                 format!("policy: cannot classify {source}[{index}]: {error}").into()
             })?;
-            Ok((!compiled.post_invocation.iter().any(effect_reads_response_content)).then(|| step.clone()))
+            Ok((!compiled
+                .post_invocation
+                .iter()
+                .any(|effect| effect_reads_response_content(effect, metadata_plugins)))
+            .then(|| step.clone()))
         })
         .filter_map(|result: Result<Option<Value>, FilterError>| result.transpose())
         .collect()
 }
 
 /// Whether an effect reads response content unavailable on metadata-only dispatch.
-fn effect_reads_response_content(effect: &Effect) -> bool {
+#[expect(
+    clippy::too_many_lines,
+    reason = "the exhaustive effect classification keeps new PPE variants compiler-visible"
+)]
+fn effect_reads_response_content(effect: &Effect, metadata_plugins: &HashSet<String>) -> bool {
     match effect {
         Effect::FieldOp { path, .. } => content_key(path),
         Effect::When { condition, body, .. } => {
-            expression_reads_response_content(condition) || body.iter().any(effect_reads_response_content)
+            expression_reads_response_content(condition)
+                || body
+                    .iter()
+                    .any(|effect| effect_reads_response_content(effect, metadata_plugins))
         },
-        Effect::Sequential(effects) | Effect::Parallel(effects) => effects.iter().any(effect_reads_response_content),
+        Effect::Sequential(effects) | Effect::Parallel(effects) => effects
+            .iter()
+            .any(|effect| effect_reads_response_content(effect, metadata_plugins)),
         Effect::Pdp {
             call,
             on_allow,
             on_deny,
         } => {
             yaml_reads_response_content(&call.args)
-                || on_allow.iter().any(effect_reads_response_content)
-                || on_deny.iter().any(effect_reads_response_content)
+                || on_allow
+                    .iter()
+                    .any(|effect| effect_reads_response_content(effect, metadata_plugins))
+                || on_deny
+                    .iter()
+                    .any(|effect| effect_reads_response_content(effect, metadata_plugins))
         },
+        Effect::Plugin { name } => !metadata_plugins.contains(name),
         Effect::Allow
         | Effect::Deny { .. }
-        | Effect::Plugin { .. }
         | Effect::Delegate(_)
         | Effect::Elicit(_)
         | Effect::Taint { .. }
@@ -219,6 +304,94 @@ fn content_key(key: &str) -> bool {
 /// Render a YAML mapping key for diagnostics.
 fn key_name(value: &Value) -> String {
     value.as_str().unwrap_or("<non-string>").to_owned()
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::items_after_test_module,
+    reason = "focused helper tests stay adjacent to the implementation and fail fast on setup errors"
+)]
+mod metadata_only_tests {
+    use super::*;
+
+    const PLUGINS: &str = "
+plugins:
+  - name: metadata
+    kind: test/metadata
+    hooks: [cmf.llm_output]
+    capabilities: [metadata_only_response]
+  - name: scanner
+    kind: test/scanner
+    hooks: [cmf.llm_output]
+";
+
+    #[test]
+    fn keeps_only_capable_plugins_and_content_independent_rules() {
+        let yaml = format!(
+            r#"{PLUGINS}
+routes:
+  - llm: "*"
+    result:
+      text: redact
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+      post_invocation:
+        - "require(completion.tokens.total > 100)"
+        - "run(scanner)"
+        - "run(metadata)"
+"#,
+        );
+        let filtered = metadata_only_policy(&yaml)
+            .expect("filter policy")
+            .expect("metadata rule remains");
+        assert!(filtered.contains("run(metadata)"));
+        assert!(!filtered.contains("run(scanner)"));
+        assert!(!filtered.contains("completion.tokens"));
+        assert!(!filtered.contains("result:"));
+        assert!(!filtered.contains("pre_invocation:"));
+    }
+
+    #[test]
+    fn drops_nested_content_rules_and_pdp_arguments() {
+        let yaml = format!(
+            r#"{PLUGINS}
+routes:
+  - llm: "*"
+    authorization:
+      post_invocation:
+        - when: "result.tokens.total > 10"
+          do:
+            parallel:
+              - "run(metadata)"
+              - deny
+        - cedar:
+            action: inspect
+            resource: completion.text
+            on_allow: [allow]
+        - "run(metadata)"
+"#,
+        );
+        let filtered = metadata_only_policy(&yaml)
+            .expect("filter policy")
+            .expect("metadata rule remains");
+        assert!(!filtered.contains("result.tokens"));
+        assert!(!filtered.contains("completion.text"));
+        assert_eq!(filtered.matches("run(metadata)").count(), 1);
+    }
+
+    #[test]
+    fn returns_none_when_only_content_dependent_rules_remain() {
+        let yaml = r#"
+routes:
+  - llm: "*"
+    authorization:
+      post_invocation:
+        - "require(completion.tokens.total > 100)"
+"#;
+        assert!(metadata_only_policy(yaml).expect("filter policy").is_none());
+    }
 }
 
 /// Locate direct and inherited field rules for one prompt/resource route.

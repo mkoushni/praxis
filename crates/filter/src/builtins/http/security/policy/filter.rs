@@ -1479,6 +1479,9 @@ impl PolicyFilter {
         reason = "linear trusted-context construction, dispatch, and output publication"
     )]
     fn dispatch_llm_response_context(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        let Some(manager) = self.response_context_mgr.as_ref() else {
+            return Ok(FilterAction::Continue);
+        };
         let Some(context) = ctx.extensions.get::<PolicyResponseContext>().cloned() else {
             return Ok(FilterAction::Continue);
         };
@@ -1500,9 +1503,6 @@ impl PolicyFilter {
         extensions.custom = Some(context.custom());
         let payload = MessagePayload {
             message: Message::with_content(Role::Assistant, Vec::new()),
-        };
-        let Some(manager) = self.response_context_mgr.as_ref() else {
-            return Ok(FilterAction::Continue);
         };
         let result = self.dispatch_response_cmf(
             manager,

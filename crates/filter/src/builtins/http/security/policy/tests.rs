@@ -4636,10 +4636,15 @@ routes:
     clippy::too_many_lines,
     reason = "test fixture — the YAML literal is the bulk; splitting utilities would obscure the shape under test"
 )]
-fn write_llm_response_context_config() -> (TempDir, String) {
+fn write_llm_response_context_config(deny: bool) -> (TempDir, String) {
     register_policy_plugin_factory("test/response-context", Arc::new(|| Box::new(ResponseContextFactory)));
     let dir = TempDir::new().expect("create tempdir");
     let cfg_path = dir.path().join("cpex.yaml");
+    let metadata_deny = if deny {
+        "        - \"deny('metadata denied', 'metadata_denied')\"\n"
+    } else {
+        ""
+    };
     let yaml = format!(
         r#"plugins:
   - name: jwt-user
@@ -4662,6 +4667,8 @@ fn write_llm_response_context_config() -> (TempDir, String) {
     kind: test/response-context
     hooks:
       - cmf.llm_output
+    capabilities:
+      - metadata_only_response
     mode: sequential
     on_error: fail
 global:
@@ -4674,7 +4681,7 @@ routes:
         - "require(authenticated)"
       post_invocation:
         - "require(completion.tokens.total > 100)"
-        - "run(response-context)"
+{metadata_deny}        - "run(response-context)"
 "#
     );
     std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
@@ -5622,7 +5629,7 @@ async fn a_streamed_response_releases_the_buffer_on_the_first_chunk() {
     reason = "the regression covers both SSE delivery phases and the published PPE output"
 )]
 async fn metadata_only_response_context_runs_through_ppe_without_buffering_sse() {
-    let (_dir, path) = write_llm_response_context_config();
+    let (_dir, path) = write_llm_response_context_config(false);
     let filter = build_read_write_filter(path);
 
     let req = request_for_alice();
@@ -5659,6 +5666,72 @@ async fn metadata_only_response_context_runs_through_ppe_without_buffering_sse()
     assert_eq!(
         output.get("quota_output"),
         Some(&json!({"engine": "ppe", "observed": {"tokens": 42}})),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn metadata_only_response_denial_is_published_without_rewriting_the_body() {
+    let (_dir, path) = write_llm_response_context_config(true);
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+    ctx.extensions.insert(PolicyResponseContext::default());
+
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("text/event-stream"));
+    ctx.response_header = Some(&mut response);
+    let original = bytes::Bytes::from_static(b"data: [DONE]\n\n");
+    let mut body = Some(original.clone());
+    let action = filter
+        .on_response_body(&mut ctx, &mut body, true)
+        .expect("metadata-only denial ran");
+
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(body, Some(original));
+    assert!(
+        ctx.extensions
+            .get::<PolicyResponseOutput>()
+            .and_then(PolicyResponseOutput::violation)
+            .is_some(),
+        "the downstream host must receive the late denial",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn read_only_non_streamed_response_publishes_metadata_policy_output() {
+    let (_dir, path) = write_llm_response_context_config(false);
+    let filter = build_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+    ctx.extensions.insert(PolicyResponseContext::new(HashMap::from([(
+        "quota_input".to_owned(),
+        json!({"tokens": 7}),
+    )])));
+
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    ctx.response_header = Some(&mut response);
+    let original = bytes::Bytes::from_static(b"{\"answer\":\"ok\"}");
+    let mut body = Some(original.clone());
+    let action = filter
+        .on_response_body(&mut ctx, &mut body, true)
+        .expect("read-only metadata policy ran");
+
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(body, Some(original));
+    let output = ctx
+        .extensions
+        .get::<PolicyResponseOutput>()
+        .expect("PPE output is available to downstream filters");
+    assert_eq!(
+        output.get("quota_output"),
+        Some(&json!({"engine": "ppe", "observed": {"tokens": 7}})),
     );
 }
 
