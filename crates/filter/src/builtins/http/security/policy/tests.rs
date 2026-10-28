@@ -5618,7 +5618,7 @@ async fn a_streamed_response_releases_the_buffer_on_the_first_chunk() {
 #[tokio::test(flavor = "multi_thread")]
 async fn metadata_only_response_context_runs_through_ppe_without_buffering_sse() {
     let (_dir, path) = write_llm_response_context_config();
-    let filter = build_filter(path);
+    let filter = build_read_write_filter(path);
 
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
@@ -5633,6 +5633,13 @@ async fn metadata_only_response_context_runs_through_ppe_without_buffering_sse()
         .headers
         .insert("content-type", HeaderValue::from_static("text/event-stream"));
     ctx.response_header = Some(&mut response);
+    let mut body = Some(bytes::Bytes::from_static(b"data: {\"delta\":\"hi\"}\n\n"));
+    let action = filter
+        .on_response_body(&mut ctx, &mut body, false)
+        .expect("streaming response phase ran");
+    assert!(matches!(action, FilterAction::Release));
+    assert!(ctx.extensions.get::<PolicyResponseOutput>().is_none());
+
     let mut body = Some(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
     let action = filter
         .on_response_body(&mut ctx, &mut body, true)

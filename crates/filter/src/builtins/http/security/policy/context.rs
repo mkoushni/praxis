@@ -5,6 +5,8 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use ppe::praxis_policy_core::error::PluginViolation;
+
 /// Host-provided values for a metadata-only inference response invocation.
 #[derive(Clone, Debug, Default)]
 pub struct PolicyResponseContext {
@@ -33,6 +35,8 @@ impl PolicyResponseContext {
 pub struct PolicyResponseOutput {
     /// Final custom extension namespace.
     custom: Arc<HashMap<String, serde_json::Value>>,
+    /// Policy denial, when the response-phase policy rejected the context.
+    violation: Option<PluginViolation>,
 }
 
 impl PolicyResponseOutput {
@@ -42,8 +46,14 @@ impl PolicyResponseOutput {
         self.custom.get(key)
     }
 
+    /// Return the response-phase denial, when policy rejected the context.
+    #[must_use]
+    pub fn violation(&self) -> Option<&PluginViolation> {
+        self.violation.as_ref()
+    }
+
     /// Build output from the policy engine's final custom namespace.
-    pub(crate) fn new(custom: Arc<HashMap<String, serde_json::Value>>) -> Self {
-        Self { custom }
+    pub(crate) fn new(custom: Arc<HashMap<String, serde_json::Value>>, violation: Option<PluginViolation>) -> Self {
+        Self { custom, violation }
     }
 }

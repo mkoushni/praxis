@@ -1501,16 +1501,21 @@ impl PolicyFilter {
             extensions,
             "metadata-only inference response-phase",
         )?;
+        let custom = result
+            .modified_extensions
+            .as_ref()
+            .and_then(|modified| modified.custom.clone())
+            .unwrap_or_else(|| context.custom());
+        let violation = result.violation.clone();
+        ctx.extensions
+            .insert(PolicyResponseOutput::new(custom, violation.clone()));
         if !result.continue_processing {
             tracing::warn!(
                 target: "policy.filter",
-                violation = ?result.violation,
-                "metadata-only inference response policy denied after response content was released",
+                violation = ?violation,
+                "metadata-only inference response policy denied after response content was released; host receives the denial in PolicyResponseOutput",
             );
             return Ok(FilterAction::Continue);
-        }
-        if let Some(custom) = result.modified_extensions.and_then(|modified| modified.custom) {
-            ctx.extensions.insert(PolicyResponseOutput::new(custom));
         }
         Ok(FilterAction::Continue)
     }
