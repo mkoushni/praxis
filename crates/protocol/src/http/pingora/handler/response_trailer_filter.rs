@@ -3,7 +3,7 @@
 
 //! Response trailer hook: let filters rewrite upstream trailers.
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use praxis_filter::FilterPipeline;
 use tracing::debug;
 
@@ -14,12 +14,19 @@ use crate::http::pingora::context::PingoraRequestCtx;
 /// Returning `Some(bytes)` tells Pingora to drop the trailers and send
 /// those bytes as the response body's final chunk instead — the
 /// conversion a browser needs, since it cannot read HTTP trailers.
+#[expect(clippy::too_many_lines, reason = "trailer state writeback is deliberately explicit")]
 pub(in crate::http) fn execute(
     pipeline: &FilterPipeline,
     trailers: &mut http::HeaderMap,
     ctx: &mut PingoraRequestCtx,
-) -> Option<Bytes> {
-    let mut filter_ctx = ctx.filter_context_for(pipeline, None)?;
+) -> Result<Option<Bytes>, String> {
+    ctx.extensions.insert(praxis_filter::ResponseTrailersPending);
+    let synthetic_body = dispatch_synthetic_eof(pipeline, ctx);
+    let _marker = ctx.extensions.remove::<praxis_filter::ResponseTrailersPending>();
+    let synthetic_body = synthetic_body?;
+    let Some(mut filter_ctx) = ctx.filter_context_for(pipeline, None) else {
+        return Ok(None);
+    };
     let produced = pipeline.execute_http_response_trailers(&mut filter_ctx, trailers);
 
     // Write back the durable channels, as every other phase does, so a
@@ -41,35 +48,48 @@ pub(in crate::http) fn execute(
     ctx.cached_body_done_indices = body_done;
 
     match produced {
-        Ok(Some(bytes)) => Some(bytes),
-        Ok(None) => {
-            // HTTP/2 may deliver a final non-EOS DATA callback followed by
-            // trailers. If no trailer filter produced a replacement body,
-            // synthesize exactly one clean EOF for response-context hooks.
-            dispatch_synthetic_eof(pipeline, ctx);
-            None
-        },
+        Ok(Some(bytes)) => Ok(Some(combine_body_bytes(synthetic_body, bytes))),
+        Ok(None) => Ok(synthetic_body),
         Err(error) => {
             debug!(%error, "response trailer filter failed; forwarding trailers unchanged");
-            None
+            Ok(None)
         },
     }
 }
 
 #[cfg(feature = "pingora")]
 /// Deliver the missing final response-body callback before trailers.
-fn dispatch_synthetic_eof(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx) {
+pub(super) fn dispatch_synthetic_eof(
+    pipeline: &FilterPipeline,
+    ctx: &mut PingoraRequestCtx,
+) -> Result<Option<Bytes>, String> {
     if !ctx.response_delivery_complete && pipeline.body_capabilities().needs_response_body {
         let mut body = None;
-        if let Err(error) = super::response_body_filter::execute(pipeline, &mut body, true, ctx) {
-            debug!(%error, "synthetic response EOF filter failed before trailers");
-        }
+        super::response_body_filter::execute(pipeline, &mut body, true, ctx).map_err(|error| error.to_string())?;
+        return Ok(body);
     }
+    Ok(None)
 }
 
 #[cfg(not(feature = "pingora"))]
 /// No body adapter exists on backend-neutral builds.
-fn dispatch_synthetic_eof(_pipeline: &FilterPipeline, _ctx: &mut PingoraRequestCtx) {}
+pub(super) fn dispatch_synthetic_eof(
+    _pipeline: &FilterPipeline,
+    _ctx: &mut PingoraRequestCtx,
+) -> Result<Option<Bytes>, String> {
+    Ok(None)
+}
+
+/// Preserve body bytes produced at EOF before appending trailer replacements.
+fn combine_body_bytes(prefix: Option<Bytes>, suffix: Bytes) -> Bytes {
+    let Some(prefix) = prefix else {
+        return suffix;
+    };
+    let mut combined = BytesMut::with_capacity(prefix.len() + suffix.len());
+    combined.extend_from_slice(&prefix);
+    combined.extend_from_slice(&suffix);
+    combined.freeze()
+}
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -121,7 +141,7 @@ mod tests {
         let result = execute(&pipeline, &mut trailers, &mut ctx);
 
         assert!(
-            result.is_none(),
+            result.expect("empty pipeline should not fail").is_none(),
             "execute should return None when filter_context_for fails"
         );
     }
@@ -136,7 +156,10 @@ mod tests {
         // Empty pipeline, should execute successfully but produce None
         let result = execute(&pipeline, &mut trailers, &mut ctx);
 
-        assert!(result.is_none(), "execute should return None for empty pipeline");
+        assert!(
+            result.expect("empty pipeline should not fail").is_none(),
+            "execute should return None for empty pipeline"
+        );
     }
 
     #[test]
@@ -148,7 +171,7 @@ mod tests {
 
         let result = execute(&pipeline, &mut trailers, &mut ctx);
 
-        assert!(result.is_none());
+        assert!(result.expect("empty trailers should not fail").is_none());
         assert!(trailers.is_empty(), "trailers should remain empty");
     }
 
@@ -163,7 +186,7 @@ mod tests {
 
         let result = execute(&pipeline, &mut trailers, &mut ctx);
 
-        assert!(result.is_none());
+        assert!(result.expect("preserved trailers should not fail").is_none());
         assert_eq!(
             trailers.get("x-custom-trailer").map(|v| v.to_str().unwrap()),
             Some("value"),
@@ -188,7 +211,7 @@ mod tests {
         let mut trailers = http::HeaderMap::new();
         let result = execute(&pipeline, &mut trailers, &mut ctx);
 
-        assert!(result.is_none());
+        assert!(result.expect("metadata writeback should not fail").is_none());
         // Metadata should be preserved through writeback
         assert_eq!(
             ctx.filter_metadata.get("before"),
@@ -210,7 +233,7 @@ mod tests {
         let mut trailers = http::HeaderMap::new();
         let result = execute(&pipeline, &mut trailers, &mut ctx);
 
-        assert!(result.is_none());
+        assert!(result.expect("structured metadata writeback should not fail").is_none());
         // Structured metadata should be preserved
         assert!(
             ctx.structured_metadata.contains_key("namespace"),
@@ -230,7 +253,7 @@ mod tests {
         let mut trailers = http::HeaderMap::new();
         let result = execute(&pipeline, &mut trailers, &mut ctx);
 
-        assert!(result.is_none());
+        assert!(result.expect("executed indices writeback should not fail").is_none());
         // The writeback should preserve or update the indices
         // Empty pipeline means indices may be reset or preserved
         assert!(
@@ -251,7 +274,7 @@ mod tests {
         let mut trailers = http::HeaderMap::new();
         let result = execute(&pipeline, &mut trailers, &mut ctx);
 
-        assert!(result.is_none());
+        assert!(result.expect("body indices writeback should not fail").is_none());
         // Body done indices should be written back
         assert!(
             !ctx.cached_body_done_indices.is_empty() || ctx.cached_body_done_indices.is_empty(),
@@ -272,7 +295,7 @@ mod tests {
 
         let result = execute(&pipeline, &mut trailers, &mut ctx);
 
-        assert!(result.is_none());
+        assert!(result.expect("trailer map should not fail").is_none());
         assert_eq!(trailers.len(), 3, "all trailers should be preserved");
         assert_eq!(trailers.get("trailer-1").map(|v| v.to_str().unwrap()), Some("value1"));
         assert_eq!(trailers.get("trailer-2").map(|v| v.to_str().unwrap()), Some("value2"));
@@ -290,14 +313,14 @@ mod tests {
         trailers1.insert("test", "first".parse().unwrap());
 
         let result1 = execute(&pipeline, &mut trailers1, &mut ctx);
-        assert!(result1.is_none());
+        assert!(result1.expect("first execution should not fail").is_none());
 
         // Second execution on the same context
         let mut trailers2 = http::HeaderMap::new();
         trailers2.insert("test", "second".parse().unwrap());
 
         let result2 = execute(&pipeline, &mut trailers2, &mut ctx);
-        assert!(result2.is_none());
+        assert!(result2.expect("second execution should not fail").is_none());
 
         // Metadata should still be there
         assert!(ctx.filter_metadata.contains_key("test"));
@@ -319,7 +342,7 @@ mod tests {
 
         let result = execute(&pipeline, &mut trailers, &mut ctx);
 
-        assert!(result.is_none());
+        assert!(result.expect("large trailer map should not fail").is_none());
         assert_eq!(trailers.len(), 100, "all trailers should be preserved");
     }
 
@@ -335,7 +358,7 @@ mod tests {
 
         let result = execute(&pipeline, &mut trailers, &mut ctx);
 
-        assert!(result.is_none());
+        assert!(result.expect("grpc trailers should not fail").is_none());
         assert!(trailers.contains_key("grpc-status"));
         assert!(trailers.contains_key("grpc-message"));
     }
@@ -350,7 +373,7 @@ mod tests {
         let mut trailers = http::HeaderMap::new();
         let result = execute(&pipeline, &mut trailers, &mut ctx);
 
-        assert!(result.is_none());
+        assert!(result.expect("extensions writeback should not fail").is_none());
         // Extensions container exists and is written back
         // (checking it doesn't panic or lose the container)
     }

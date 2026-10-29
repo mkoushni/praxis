@@ -136,7 +136,9 @@ pub use credentials::{DeferredCredential, PendingCredentials};
 pub use error_response::{
     ErrorResponseContext, ErrorResponseFormatter, ErrorResponseFormatterHandle, FormattedErrorResponse,
 };
-pub use extensions::{AuthenticatedIdentity, ClientResponseHeadersCommitted, RequestExtensions};
+pub use extensions::{
+    AuthenticatedIdentity, ClientResponseHeadersCommitted, RequestExtensions, ResponseTrailersPending,
+};
 pub use factory::{
     EmptyFilterConfig, FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config,
     tcp_builtin,
