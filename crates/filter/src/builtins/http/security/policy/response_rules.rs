@@ -282,9 +282,18 @@ fn condition_reads_response_content(condition: &Condition) -> bool {
 /// Whether opaque PDP arguments contain a response-content attribute reference.
 fn yaml_reads_response_content(value: &Value) -> bool {
     match value {
-        Value::String(value) => value
-            .split(|character: char| !character.is_alphanumeric() && character != '_' && character != '.')
-            .any(content_key),
+        Value::String(value) => {
+            let trimmed = value.trim();
+            let quoted_literal = (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+                || (trimmed.starts_with('"') && trimmed.ends_with('"'));
+            if quoted_literal && !trimmed.contains('.') {
+                false
+            } else {
+                trimmed
+                    .split(|character: char| !character.is_alphanumeric() && character != '_' && character != '.')
+                    .any(content_key)
+            }
+        },
         Value::Sequence(values) => values.iter().any(yaml_reads_response_content),
         Value::Mapping(values) => values
             .iter()

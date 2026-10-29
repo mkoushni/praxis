@@ -67,6 +67,9 @@ use crate::{
 /// Empty request body used for parsing bodyless requests.
 static EMPTY_BODY: Bytes = Bytes::new();
 
+#[derive(Clone, Copy)]
+struct StreamedInferenceResponse;
+
 // -----------------------------------------------------------------------------
 // PolicyFilter
 // -----------------------------------------------------------------------------
@@ -1518,7 +1521,11 @@ impl PolicyFilter {
             .as_ref()
             .and_then(|modified| modified.custom.clone())
             .unwrap_or(host_custom);
-        let violation = result.violation.clone();
+        let violation = ctx
+            .extensions
+            .get::<PolicyResponseOutput>()
+            .and_then(|output| output.violation().cloned())
+            .or(result.violation.clone());
         ctx.extensions
             .insert(PolicyResponseOutput::new(custom, violation.clone()));
         if !result.continue_processing {
@@ -2310,6 +2317,9 @@ impl HttpFilter for PolicyFilter {
         let Some(response) = ctx.response_header.as_ref() else {
             return Ok(FilterAction::Continue);
         };
+        if Self::response_is_event_stream(ctx) {
+            ctx.extensions.insert(StreamedInferenceResponse);
+        }
         let extensions = Self::response_extensions(
             ctx,
             snapshot_response_headers(&response.headers),
@@ -2347,7 +2357,7 @@ impl HttpFilter for PolicyFilter {
         // Keep the clean-EOF callback available for metadata-only response policy.
         if !end_of_stream
             && matches!(self.cfg.body_access, BodyAccessMode::ReadWrite)
-            && self.inference_response_is_streamed(ctx)
+            && (self.inference_response_is_streamed(ctx) || ctx.extensions.get::<StreamedInferenceResponse>().is_some())
         {
             return Ok(FilterAction::Release);
         }
@@ -2361,7 +2371,9 @@ impl HttpFilter for PolicyFilter {
         }
         if self.llm_post
             && ctx.extensions.get::<PolicyResponseContext>().is_some()
-            && (matches!(self.cfg.body_access, BodyAccessMode::ReadOnly) || self.inference_response_is_streamed(ctx))
+            && (matches!(self.cfg.body_access, BodyAccessMode::ReadOnly)
+                || self.inference_response_is_streamed(ctx)
+                || ctx.extensions.get::<StreamedInferenceResponse>().is_some())
         {
             return self.dispatch_llm_response_context(ctx);
         }
