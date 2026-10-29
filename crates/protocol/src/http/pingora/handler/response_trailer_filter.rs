@@ -73,6 +73,10 @@ pub(super) fn dispatch_synthetic_eof(
 
 #[cfg(not(feature = "pingora"))]
 /// No body adapter exists on backend-neutral builds.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "keep the backend-neutral helper signature aligned with Pingora"
+)]
 pub(super) fn dispatch_synthetic_eof(
     _pipeline: &FilterPipeline,
     _ctx: &mut PingoraRequestCtx,
