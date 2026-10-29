@@ -19,11 +19,6 @@ pub(in crate::http) fn execute(
     trailers: &mut http::HeaderMap,
     ctx: &mut PingoraRequestCtx,
 ) -> Option<Bytes> {
-    // HTTP/2 may deliver a final non-EOS DATA callback followed by trailers.
-    // In that lifecycle there is no separate empty EOS callback, so synthesize
-    // exactly one clean EOF before running trailer filters. This is required
-    // for response-context hooks that dispatch only at body EOF.
-    dispatch_synthetic_eof(pipeline, ctx);
     let mut filter_ctx = ctx.filter_context_for(pipeline, None)?;
     let produced = pipeline.execute_http_response_trailers(&mut filter_ctx, trailers);
 
@@ -46,7 +41,14 @@ pub(in crate::http) fn execute(
     ctx.cached_body_done_indices = body_done;
 
     match produced {
-        Ok(bytes) => bytes,
+        Ok(Some(bytes)) => Some(bytes),
+        Ok(None) => {
+            // HTTP/2 may deliver a final non-EOS DATA callback followed by
+            // trailers. If no trailer filter produced a replacement body,
+            // synthesize exactly one clean EOF for response-context hooks.
+            dispatch_synthetic_eof(pipeline, ctx);
+            None
+        }
         Err(error) => {
             debug!(%error, "response trailer filter failed; forwarding trailers unchanged");
             None
