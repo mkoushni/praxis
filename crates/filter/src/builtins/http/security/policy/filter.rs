@@ -68,6 +68,7 @@ use crate::{
 static EMPTY_BODY: Bytes = Bytes::new();
 
 #[derive(Clone, Copy)]
+/// Marker retained from `on_response` until the body EOF callback.
 struct StreamedInferenceResponse;
 
 // -----------------------------------------------------------------------------
@@ -1525,7 +1526,7 @@ impl PolicyFilter {
             .extensions
             .get::<PolicyResponseOutput>()
             .and_then(|output| output.violation().cloned())
-            .or(result.violation.clone());
+            .or_else(|| result.violation.clone());
         ctx.extensions
             .insert(PolicyResponseOutput::new(custom, violation.clone()));
         if !result.continue_processing {
