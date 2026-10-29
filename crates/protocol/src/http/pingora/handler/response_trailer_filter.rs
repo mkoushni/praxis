@@ -23,6 +23,7 @@ pub(in crate::http) fn execute(
     // In that lifecycle there is no separate empty EOS callback, so synthesize
     // exactly one clean EOF before running trailer filters. This is required
     // for response-context hooks that dispatch only at body EOF.
+    #[cfg(feature = "pingora")]
     if !ctx.response_delivery_complete && pipeline.body_capabilities().needs_response_body {
         let mut body = None;
         if let Err(error) = super::response_body_filter::execute(pipeline, &mut body, true, ctx) {
