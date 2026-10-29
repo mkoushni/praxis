@@ -49,6 +49,14 @@ pub(in crate::http) fn execute(
 
     match produced {
         Ok(Some(bytes)) => Ok(Some(combine_body_bytes(synthetic_body, bytes))),
+        Ok(None) if synthetic_body.is_some() && !trailers.is_empty() => {
+            // Pingora's callback cannot return a body task and trailers in
+            // the same HTTP/2 event (RFC 9113 §8.1). Keep upstream trailers
+            // authoritative rather than silently replacing them with the
+            // synthetic EOF body.
+            debug!("preserving upstream trailers over synthetic EOF body bytes");
+            Ok(None)
+        },
         Ok(None) => Ok(synthetic_body),
         Err(error) => {
             debug!(%error, "response trailer filter failed; forwarding trailers unchanged");

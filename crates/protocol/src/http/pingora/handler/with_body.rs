@@ -307,18 +307,6 @@ impl ProxyHttp for PingoraHttpHandler {
         let produced = response_trailer_filter::execute(&pipeline, upstream_trailers, ctx)
             .map_err(|error| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, error))?;
         hop_by_hop::strip_reserved_internal_header_map(upstream_trailers);
-        // Pingora's callback can return either a final body task or the
-        // upstream trailer task, but cannot represent both at once. Preserve
-        // HTTP/2 trailers (RFC 9113 §8.1) when a synthetic EOF produced body
-        // bytes; replacing the trailer task would silently discard fields
-        // such as grpc-status. Buffered body rewrites must therefore be
-        // completed before trailers are delivered.
-        if produced.is_some() && !upstream_trailers.is_empty() {
-            tracing::warn!(
-                "response trailer filter produced synthetic body bytes alongside upstream trailers; preserving trailers"
-            );
-            return Ok(None);
-        }
         Ok(produced)
     }
 
