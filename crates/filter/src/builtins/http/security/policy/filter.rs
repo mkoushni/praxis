@@ -1395,7 +1395,7 @@ impl PolicyFilter {
     )]
     fn dispatch_llm_response(
         &self,
-        ctx: &HttpFilterContext<'_>,
+        ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
     ) -> Result<FilterAction, FilterError> {
         let Some(model) = Self::llm_response_model(ctx) else {
@@ -1462,12 +1462,40 @@ impl PolicyFilter {
             capabilities: Vec::new(),
         }));
         extensions.completion = Some(Arc::new(parsed.completion()));
+        let response_context = ctx
+            .extensions
+            .get::<PolicyResponseContext>()
+            .map(PolicyResponseContext::custom);
+        if let Some(custom) = response_context.as_ref() {
+            extensions.custom = Some(Arc::clone(custom));
+        }
 
         let payload = MessagePayload {
             message: response_message(&parsed),
         };
         let cmf_result =
-            self.dispatch_response_cmf(&self.mgr, hook_name, payload, extensions, "inference response-phase")?;
+            match self.dispatch_response_cmf(&self.mgr, hook_name, payload, extensions, "inference response-phase") {
+                Ok(result) => result,
+                Err(error) if response_context.is_some() => {
+                    let violation = PluginViolation::new("llm.response_context_unavailable", error.to_string());
+                    if let Some(host_custom) = response_context.clone() {
+                        ctx.extensions
+                            .insert(PolicyResponseOutput::new(host_custom, Some(violation)));
+                    }
+                    tracing::warn!(target: "policy.filter", %error, "response policy dispatch failed; continuing");
+                    return Ok(FilterAction::Continue);
+                },
+                Err(error) => return Err(error),
+            };
+        if let Some(host_custom) = response_context {
+            let custom = cmf_result
+                .modified_extensions
+                .as_ref()
+                .and_then(|modified| modified.custom.clone())
+                .unwrap_or(host_custom);
+            ctx.extensions
+                .insert(PolicyResponseOutput::new(custom, cmf_result.violation.clone()));
+        }
 
         if !cmf_result.continue_processing {
             tracing::warn!(
@@ -1502,6 +1530,10 @@ impl PolicyFilter {
         clippy::too_many_lines,
         reason = "linear trusted-context construction, dispatch, and output publication"
     )]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "response-phase dispatch shares the fallible hook signature with content evaluation"
+    )]
     fn dispatch_llm_response_context(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let Some(context) = ctx.extensions.get::<PolicyResponseContext>() else {
             return Ok(FilterAction::Continue);
@@ -1512,13 +1544,20 @@ impl PolicyFilter {
             return Ok(FilterAction::Continue);
         };
         let Some(InferenceRequest { model }) = ctx.extensions.get::<InferenceRequest>() else {
+            ctx.extensions.insert(PolicyResponseOutput::new(host_custom, None));
             return Ok(FilterAction::Continue);
         };
         let model = model.clone();
         let mut headers = Self::snapshot_headers(ctx);
         Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
         let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() else {
-            return Err("policy: request identity unavailable for metadata-only response policy".into());
+            let violation = PluginViolation::new(
+                "llm.response_context_unavailable",
+                "request identity unavailable for metadata-only response policy",
+            );
+            ctx.extensions
+                .insert(PolicyResponseOutput::new(host_custom, Some(violation)));
+            return Ok(FilterAction::Continue);
         };
         let mut extensions = Self::extensions_from_identity(&headers, identity, ENTITY_LLM, &model, &self.cfg);
         extensions.llm = Some(Arc::new(LLMExtension {
@@ -1530,13 +1569,22 @@ impl PolicyFilter {
         let payload = MessagePayload {
             message: Message::with_content(Role::Assistant, Vec::new()),
         };
-        let result = self.dispatch_response_cmf(
+        let result = match self.dispatch_response_cmf(
             manager,
             HOOK_CMF_LLM_OUTPUT,
             payload,
             extensions,
             "metadata-only inference response-phase",
-        )?;
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                let violation = PluginViolation::new("llm.response_context_unavailable", error.to_string());
+                ctx.extensions
+                    .insert(PolicyResponseOutput::new(host_custom, Some(violation)));
+                tracing::warn!(target: "policy.filter", %error, "metadata-only response policy dispatch failed; continuing");
+                return Ok(FilterAction::Continue);
+            },
+        };
         let custom = result
             .modified_extensions
             .as_ref()
@@ -2404,6 +2452,9 @@ impl HttpFilter for PolicyFilter {
         }
 
         if self.llm_post && ctx.extensions.get::<InferenceRequest>().is_some() {
+            if ctx.extensions.get::<StreamedInferenceResponse>().is_some() {
+                return Ok(FilterAction::Release);
+            }
             return self.dispatch_llm_response(ctx, body);
         }
 
