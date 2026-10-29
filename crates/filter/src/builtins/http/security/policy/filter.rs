@@ -2332,15 +2332,15 @@ impl HttpFilter for PolicyFilter {
         reason = "PPE response dispatch carries large async payloads"
     )]
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if self.llm_post && ctx.extensions.get::<InferenceRequest>().is_some() && Self::response_is_event_stream(ctx) {
+            ctx.extensions.insert(StreamedInferenceResponse);
+        }
         let Some(hook) = self.response_hook else {
             return Ok(FilterAction::Continue);
         };
         let Some(response) = ctx.response_header.as_ref() else {
             return Ok(FilterAction::Continue);
         };
-        if Self::response_is_event_stream(ctx) {
-            ctx.extensions.insert(StreamedInferenceResponse);
-        }
         let extensions = Self::response_extensions(
             ctx,
             snapshot_response_headers(&response.headers),

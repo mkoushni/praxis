@@ -351,8 +351,12 @@ fn yaml_reads_response_content(value: &Value) -> bool {
     match value {
         Value::String(value) => {
             let trimmed = value.trim();
-            let quoted_literal = (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-                || (trimmed.starts_with('"') && trimmed.ends_with('"'));
+            let quoted_literal = ['\'', '"'].iter().any(|quote| {
+                trimmed
+                    .strip_prefix(*quote)
+                    .and_then(|value| value.strip_suffix(*quote))
+                    .is_some_and(|value| !value.contains(*quote))
+            });
             if quoted_literal && !trimmed.contains('.') {
                 false
             } else {
