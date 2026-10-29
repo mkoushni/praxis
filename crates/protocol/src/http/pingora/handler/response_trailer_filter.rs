@@ -48,7 +48,7 @@ pub(in crate::http) fn execute(
             // synthesize exactly one clean EOF for response-context hooks.
             dispatch_synthetic_eof(pipeline, ctx);
             None
-        }
+        },
         Err(error) => {
             debug!(%error, "response trailer filter failed; forwarding trailers unchanged");
             None
