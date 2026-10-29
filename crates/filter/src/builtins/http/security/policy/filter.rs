@@ -366,7 +366,14 @@ impl PolicyFilter {
             cfg.allow_private_idp,
             &cfg.trusted_private_endpoints,
         );
-        let mgr = Self::load_policy_engine(&yaml, &cfg.config_path, Arc::clone(&transport), cfg.init_timeout_secs)?;
+        let session_store: Arc<dyn ppe::SessionStore> = Arc::new(ppe::MemorySessionStore::new());
+        let mgr = Self::load_policy_engine(
+            &yaml,
+            &cfg.config_path,
+            Arc::clone(&transport),
+            cfg.init_timeout_secs,
+            Arc::clone(&session_store),
+        )?;
 
         // Derive the evaluation shape from the loaded policy so the filter
         // needs no operator-set mode. `has_hooks_for` reports whether a hook
@@ -435,6 +442,7 @@ impl PolicyFilter {
                         &cfg.config_path,
                         Arc::clone(&transport),
                         cfg.init_timeout_secs,
+                        Arc::clone(&session_store),
                     )
                 })
                 .transpose()?
@@ -508,9 +516,21 @@ impl PolicyFilter {
         source: &str,
         transport: Arc<PolicyHttpTransport>,
         init_timeout_secs: u64,
+        session_store: Arc<dyn ppe::SessionStore>,
     ) -> Result<Arc<PolicyEngine>, FilterError> {
         let manager = Arc::new(PolicyEngine::default());
-        ppe::install_builtins(&manager);
+        ppe::register_builtin_plugins(&manager);
+        ppe::register_apl(
+            &manager,
+            ppe::AplOptions {
+                dispatch_cache: Arc::new(ppe::DispatchCache::new()),
+                session_store,
+                pdps: Vec::new(),
+                pdp_factories: ppe::builtin_pdp_factories(),
+                session_store_factories: ppe::builtin_session_store_factories(),
+                base_capabilities: None,
+            },
+        );
         if !manager.set_http_transport(transport) {
             tracing::warn!(
                 target: "policy.filter",

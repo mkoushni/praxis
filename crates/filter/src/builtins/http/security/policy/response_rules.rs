@@ -77,7 +77,19 @@ fn filter_document(document: &mut Value) -> Result<usize, FilterError> {
     let Some(root) = document.as_mapping_mut() else {
         return Ok(0);
     };
+    // The response view must observe labels written by the request view. Its
+    // visitor starts with the shared store supplied by the host; do not let a
+    // second `global.session_store` declaration replace that handle.
+    if let Some(global) = root.get_mut("global").and_then(Value::as_mapping_mut) {
+        global.remove("session_store");
+    }
     let metadata_plugins = retain_metadata_response_plugins(root);
+    // Keep a copy of explicit plugin references before content-dependent
+    // steps are removed. A capable plugin referenced only by a dropped
+    // `when`/PDP step would otherwise remain as an orphan declaration and
+    // make the filtered document fail PPE validation. Hook-dispatch plugins
+    // with no explicit `run(...)` reference are intentionally preserved.
+    let declared_references = plugin_references(&Value::Mapping(root.clone()));
     let mut retained = metadata_plugins.len();
     if let Some(global) = root.get_mut("global") {
         retained = retained.saturating_add(filter_policy_block(global, "global", &metadata_plugins)?);
@@ -109,7 +121,62 @@ fn filter_document(document: &mut Value) -> Result<usize, FilterError> {
             )?);
         }
     }
+    prune_unreachable_metadata_plugins(root, &metadata_plugins, &declared_references);
     Ok(retained)
+}
+
+/// Remove capable declarations that no retained policy step can invoke.
+fn prune_unreachable_metadata_plugins(
+    root: &mut serde_yaml::Mapping,
+    metadata_plugins: &HashSet<String>,
+    declared_references: &HashSet<String>,
+) {
+    let retained_references = plugin_references(&Value::Mapping(root.clone()));
+    let Some(plugins) = root.get_mut("plugins").and_then(Value::as_sequence_mut) else {
+        return;
+    };
+    plugins.retain(|plugin| {
+        let Some(name) = plugin
+            .as_mapping()
+            .and_then(|mapping| mapping.get("name"))
+            .and_then(Value::as_str)
+        else {
+            return false;
+        };
+        metadata_plugins.contains(name) && (!declared_references.contains(name) || retained_references.contains(name))
+    });
+}
+
+/// Collect explicit `run(plugin)` references from a YAML value.
+fn plugin_references(value: &Value) -> HashSet<String> {
+    let mut references = HashSet::new();
+    collect_plugin_references(value, &mut references);
+    references
+}
+
+/// Recursive implementation for [`plugin_references`].
+fn collect_plugin_references(value: &Value, references: &mut HashSet<String>) {
+    match value {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if let Some(name) = trimmed.strip_prefix("run(").and_then(|name| name.strip_suffix(')'))
+                && !name.is_empty()
+                && name
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '-')
+            {
+                references.insert(name.to_owned());
+            }
+        },
+        Value::Sequence(values) => values
+            .iter()
+            .for_each(|value| collect_plugin_references(value, references)),
+        Value::Mapping(values) => values
+            .values()
+            .for_each(|value| collect_plugin_references(value, references)),
+        Value::Tagged(tagged) => collect_plugin_references(&tagged.value, references),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {},
+    }
 }
 
 /// Retain response plugins that explicitly accept an empty message payload.
@@ -357,6 +424,7 @@ routes:
             .expect("metadata rule remains");
         assert!(filtered.contains("run(metadata)"));
         assert!(!filtered.contains("run(scanner)"));
+        assert!(!filtered.contains("name: scanner"));
         assert!(!filtered.contains("completion.tokens"));
         assert!(!filtered.contains("result:"));
         assert!(!filtered.contains("pre_invocation:"));
